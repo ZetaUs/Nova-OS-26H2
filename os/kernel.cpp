@@ -11,6 +11,7 @@ static void pixel(uint16_t x, uint16_t y, uint8_t color);
 static void draw_start_menu_actions();
 static void restore_mouse_cursor();
 static void draw_mouse_cursor();
+static void handle_mouse_packet();
 
 #include <logo_data.h>
 #include <mouse_cursor_data.h>
@@ -56,11 +57,6 @@ struct ZexIdtEntry {
     uint32_t reserved;
 } __attribute__((packed));
 
-struct ZexIdtr {
-    uint16_t limit;
-    uint64_t base;
-} __attribute__((packed));
-
 struct ZexProgram {
     const uint8_t* image;
     uint32_t image_size;
@@ -79,6 +75,7 @@ struct ZexRuntime {
 };
 
 static ZexIdtEntry zex_idt[256];
+static uint8_t zex_idtr[10];
 static ZexRuntime zex_runtime;
 static const ZexProgram zex_programs[] = {
     { zex_filemgr, zex_filemgr_size },
@@ -90,6 +87,7 @@ static const ZexProgram zex_programs[] = {
 
 extern "C" void zex_interrupt_handler();
 extern "C" void zex_exit_trampoline();
+extern "C" void zex_call_entry(uint64_t entry);
 extern "C" void zex_syscall_dispatch(ZexRegisterFrame* registers);
 
 static inline void copy_to_framebuffer(
@@ -655,11 +653,14 @@ static void install_zex_syscall_gate() {
     gate.offset_high = static_cast<uint32_t>(handler >> 32);
     gate.reserved = 0;
 
-    const ZexIdtr descriptor = {
-        static_cast<uint16_t>(sizeof(zex_idt) - 1),
-        reinterpret_cast<uintptr_t>(zex_idt)
-    };
-    __asm__ volatile("lidt %0" : : "m"(descriptor));
+    const uint16_t limit = static_cast<uint16_t>(sizeof(zex_idt) - 1);
+    const uintptr_t base = reinterpret_cast<uintptr_t>(zex_idt);
+    zex_idtr[0] = static_cast<uint8_t>(limit);
+    zex_idtr[1] = static_cast<uint8_t>(limit >> 8);
+    for (uint32_t byte = 0; byte < 8; ++byte) {
+        zex_idtr[byte + 2] = static_cast<uint8_t>(base >> (byte * 8));
+    }
+    __asm__ volatile("lidt %0" : : "m"(zex_idtr));
 }
 
 static uint16_t read_zex_u16(const uint8_t* image, uint32_t offset) {
@@ -743,14 +744,26 @@ static bool load_zex_program(const ZexProgram& program, uint64_t& entry) {
 
 static void wait_for_zex_key() {
     for (;;) {
-        if ((in8(0x64) & 1) == 0) {
+        const uint8_t status = in8(0x64);
+        if ((status & 1) == 0) {
             __asm__ volatile("pause");
             continue;
         }
-        const uint8_t status = in8(0x64);
-        const uint8_t scan_code = in8(0x60);
-        if ((status & 0x20) == 0 && scan_code != 0xE0 &&
-            (scan_code & 0x80) == 0) {
+        const uint8_t data = in8(0x60);
+        if ((status & 0x20) != 0) {
+            if (mouse_packet_stage == 0) {
+                if ((data & 0x08) != 0) {
+                    mouse_packet[0] = data;
+                    mouse_packet_stage = 1;
+                }
+            } else {
+                mouse_packet[mouse_packet_stage++] = data;
+                if (mouse_packet_stage == 3) {
+                    mouse_packet_stage = 0;
+                    handle_mouse_packet();
+                }
+            }
+        } else if (data != 0xE0 && (data & 0x80) == 0) {
             return;
         }
     }
@@ -795,7 +808,7 @@ static void run_zex_program(uint32_t program_index) {
     zex_runtime.title[0] = '\0';
     zex_runtime.message[0] = '\0';
     mouse_cursor_drawn = false;
-    reinterpret_cast<void (*)()>(static_cast<uintptr_t>(entry))();
+    zex_call_entry(entry);
     zex_runtime.running = false;
     zex_runtime.window_open = false;
     draw_desktop();
@@ -1034,7 +1047,8 @@ static void handle_mouse_packet() {
                -static_cast<int8_t>(mouse_packet[2]));
 
     const uint8_t buttons = flags & 7;
-    if ((buttons & 1) != 0 && (mouse_buttons & 1) == 0) {
+    if (!zex_runtime.window_open &&
+        (buttons & 1) != 0 && (mouse_buttons & 1) == 0) {
         const int screen_bottom = static_cast<int>(screen_height);
             if (start_menu_open && mouse_x >= 52 && mouse_x < 562 &&
                 mouse_y >= screen_bottom - 264 && mouse_y < screen_bottom - 212) {

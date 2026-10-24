@@ -3,6 +3,7 @@ bits 64
 global kernel_entry
 global zex_interrupt_handler
 global zex_exit_trampoline
+global zex_call_entry
 extern kernel_main
 extern zex_syscall_dispatch
 
@@ -58,4 +59,26 @@ zex_interrupt_handler:
     iretq
 
 zex_exit_trampoline:
+    ret
+
+zex_call_entry:
+    push rbx
+    push rbp
+    push rdi
+    push rsi
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 40
+    call rcx
+    add rsp, 40
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rsi
+    pop rdi
+    pop rbp
+    pop rbx
     ret

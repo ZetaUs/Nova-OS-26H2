@@ -44,7 +44,7 @@ start:
 
     mov word [wallpaper_remaining], 993
     mov word [wallpaper_dap + 6], 0x2000
-    mov dword [wallpaper_dap + 8], 105
+    mov dword [wallpaper_dap + 8], 136
     mov dword [wallpaper_dap + 12], 0
 .read_wallpaper:
     mov ax, [wallpaper_remaining]
