@@ -34,6 +34,7 @@ static uint8_t mouse_packet_stage;
 static uint8_t mouse_buttons;
 static bool mouse_cursor_drawn;
 static bool keyboard_extended;
+static bool keyboard_alt_down;
 static uint8_t menu_selection;
 static uint32_t mouse_cursor_background[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT];
 static uint8_t mouse_cursor_coverage[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT];
@@ -65,6 +66,7 @@ struct ZexProgram {
 struct ZexRuntime {
     bool running;
     bool window_open;
+    bool close_requested;
     uint32_t code_end;
     uint32_t data_start;
     uint32_t data_end;
@@ -614,13 +616,21 @@ static void draw_zex_window() {
         x + zex_runtime.window_width - 42, y + 10, 26, 24, 6,
         0xA84453, 0x782B3C
     );
-    draw_text("X", x + zex_runtime.window_width - 34, y + 12, 1, 0xFFFFFF);
+    const int close_center_x = x + zex_runtime.window_width - 29;
+    const int close_center_y = y + 22;
+    for (int offset = 0; offset < 14; ++offset) {
+        fill_rect(close_center_x - 7 + offset, close_center_y - 7 + offset,
+                  2, 2, 0xFFFFFF);
+        fill_rect(close_center_x + 6 - offset, close_center_y - 7 + offset,
+                  2, 2, 0xFFFFFF);
+    }
     fill_rounded_rect_gradient(
         x + 20, y + 64, zex_runtime.window_width - 40,
         zex_runtime.window_height - 84, 8, 0x152C43, 0x0D1C2C
     );
     draw_text(zex_runtime.message, x + 38, y + 90, 1, 0xE3EDF7);
-    draw_text("按任意键关闭", x + 24, y + zex_runtime.window_height - 42, 1, 0x9BB1C8);
+    draw_text("点击右上角按钮或按 Alt+F4 关闭", x + 24,
+              y + zex_runtime.window_height - 42, 1, 0x9BB1C8);
     present_backbuffer();
 }
 
@@ -743,7 +753,7 @@ static bool load_zex_program(const ZexProgram& program, uint64_t& entry) {
 }
 
 static void wait_for_zex_key() {
-    for (;;) {
+    while (!zex_runtime.close_requested) {
         const uint8_t status = in8(0x64);
         if ((status & 1) == 0) {
             __asm__ volatile("pause");
@@ -763,8 +773,21 @@ static void wait_for_zex_key() {
                     handle_mouse_packet();
                 }
             }
-        } else if (data != 0xE0 && (data & 0x80) == 0) {
-            return;
+        } else if (data == 0xE0) {
+            keyboard_extended = true;
+        } else {
+            const bool released = (data & 0x80) != 0;
+            const uint8_t key = data & 0x7F;
+            const bool extended = keyboard_extended;
+            keyboard_extended = false;
+            if (!extended && key == 0x38) {
+                keyboard_alt_down = !released;
+            } else if (!released && !extended && key == 0x3E &&
+                       keyboard_alt_down) {
+                zex_runtime.close_requested = true;
+            } else if (!released && !extended && key != 0x38) {
+                return;
+            }
         }
     }
 }
@@ -780,6 +803,7 @@ static void copy_zex_literal(char* destination, uint32_t capacity, const char* s
 
 static void show_zex_load_error() {
     zex_runtime.window_open = true;
+    zex_runtime.close_requested = false;
     zex_runtime.window_width = 520;
     zex_runtime.window_height = 240;
     copy_zex_literal(zex_runtime.title, sizeof(zex_runtime.title), "程序加载失败");
@@ -805,12 +829,16 @@ static void run_zex_program(uint32_t program_index) {
 
     zex_runtime.running = true;
     zex_runtime.window_open = false;
+    zex_runtime.close_requested = false;
+    keyboard_alt_down = false;
     zex_runtime.title[0] = '\0';
     zex_runtime.message[0] = '\0';
     mouse_cursor_drawn = false;
     zex_call_entry(entry);
     zex_runtime.running = false;
     zex_runtime.window_open = false;
+    zex_runtime.close_requested = false;
+    restore_mouse_cursor();
     draw_desktop();
     draw_mouse_cursor();
 }
@@ -1047,26 +1075,37 @@ static void handle_mouse_packet() {
                -static_cast<int8_t>(mouse_packet[2]));
 
     const uint8_t buttons = flags & 7;
-    if (!zex_runtime.window_open &&
-        (buttons & 1) != 0 && (mouse_buttons & 1) == 0) {
-        const int screen_bottom = static_cast<int>(screen_height);
+    if ((buttons & 1) != 0 && (mouse_buttons & 1) == 0) {
+        if (zex_runtime.window_open) {
+            const int window_x =
+                (static_cast<int>(screen_width) - zex_runtime.window_width) / 2;
+            const int window_y =
+                (static_cast<int>(screen_height) - zex_runtime.window_height) / 2;
+            if (mouse_x >= window_x + zex_runtime.window_width - 42 &&
+                mouse_x < window_x + zex_runtime.window_width - 16 &&
+                mouse_y >= window_y + 10 && mouse_y < window_y + 34) {
+                zex_runtime.close_requested = true;
+            }
+        } else {
+            const int screen_bottom = static_cast<int>(screen_height);
             if (start_menu_open && mouse_x >= 52 && mouse_x < 562 &&
                 mouse_y >= screen_bottom - 264 && mouse_y < screen_bottom - 212) {
-            restart_system();
-        } else if (start_menu_open && mouse_x >= 52 && mouse_x < 562 &&
-                   mouse_y >= screen_bottom - 204 && mouse_y < screen_bottom - 152) {
-            shutdown_system();
-        } else if (!start_menu_open && mouse_x >= 38 && mouse_x < 166 &&
-                   mouse_y >= 50 && mouse_y < 830) {
-            run_zex_program(static_cast<uint32_t>((mouse_y - 50) / 156));
-        } else if (mouse_x < 84 && mouse_y >= screen_bottom - 76) {
-            start_menu_open = !start_menu_open;
-            refresh_start_menu();
-        } else if (start_menu_open &&
-                   (mouse_x < 24 || mouse_x >= 594 ||
-                    mouse_y < screen_bottom - 618 || mouse_y >= screen_bottom - 88)) {
-            start_menu_open = false;
-            refresh_start_menu();
+                restart_system();
+            } else if (start_menu_open && mouse_x >= 52 && mouse_x < 562 &&
+                       mouse_y >= screen_bottom - 204 && mouse_y < screen_bottom - 152) {
+                shutdown_system();
+            } else if (!start_menu_open && mouse_x >= 38 && mouse_x < 166 &&
+                       mouse_y >= 50 && mouse_y < 830) {
+                run_zex_program(static_cast<uint32_t>((mouse_y - 50) / 156));
+            } else if (mouse_x < 84 && mouse_y >= screen_bottom - 76) {
+                start_menu_open = !start_menu_open;
+                refresh_start_menu();
+            } else if (start_menu_open &&
+                       (mouse_x < 24 || mouse_x >= 594 ||
+                        mouse_y < screen_bottom - 618 || mouse_y >= screen_bottom - 88)) {
+                start_menu_open = false;
+                refresh_start_menu();
+            }
         }
     }
     mouse_buttons = buttons;
@@ -1097,6 +1136,7 @@ extern "C" __attribute__((noreturn)) void kernel_main(
     mouse_buttons = 0;
     mouse_cursor_drawn = false;
     keyboard_extended = false;
+    keyboard_alt_down = false;
     menu_selection = 0;
     install_zex_syscall_gate();
     initialize_mouse_cursor();
