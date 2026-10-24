@@ -41,6 +41,7 @@ static uint8_t mouse_cursor_coverage[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT];
 static uint8_t mouse_cursor_shade[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT];
 static const uintptr_t backbuffer_address = 0x01000000;
 static const uintptr_t zex_load_address = 0x00400000;
+static const uint32_t file_manager_entry_limit = 20;
 
 struct ZexRegisterFrame {
     uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
@@ -67,6 +68,7 @@ struct ZexRuntime {
     bool running;
     bool window_open;
     bool close_requested;
+    bool file_manager;
     uint32_t code_end;
     uint32_t data_start;
     uint32_t data_end;
@@ -76,9 +78,50 @@ struct ZexRuntime {
     char message[128];
 };
 
+struct FatVolume {
+    uint8_t ata_drive;
+    uint8_t fat_type;
+    uint8_t sectors_per_cluster;
+    uint8_t fat_count;
+    uint16_t reserved_sectors;
+    uint16_t root_entry_count;
+    uint32_t partition_start;
+    uint32_t partition_sectors;
+    uint32_t total_sectors;
+    uint32_t fat_sectors;
+    uint32_t root_cluster;
+    uint32_t root_sector;
+    uint32_t root_sectors;
+    uint32_t data_sector;
+    bool mounted;
+};
+
+struct FileManagerEntry {
+    char name[64];
+    uint32_t cluster;
+    uint32_t size;
+    bool directory;
+};
+
 static ZexIdtEntry zex_idt[256];
 static uint8_t zex_idtr[10];
 static ZexRuntime zex_runtime;
+static FatVolume file_manager_volumes[2];
+static FileManagerEntry file_manager_entries[file_manager_entry_limit];
+static uint32_t file_manager_entry_count;
+static uint32_t file_manager_selected;
+static uint32_t file_manager_directory_cluster;
+static uint32_t file_manager_parent_clusters[16];
+static char file_manager_parent_names[16][64];
+static uint8_t file_manager_parent_depth;
+static uint8_t file_manager_volume_index;
+static bool file_manager_entries_truncated;
+static bool file_manager_read_error;
+static char file_manager_status[128];
+static uint16_t file_manager_long_name[260];
+static uint8_t ata_sector_buffer[512];
+static uint8_t fat_sector_buffer[512];
+static uint8_t directory_sector_buffer[512];
 static const ZexProgram zex_programs[] = {
     { zex_filemgr, zex_filemgr_size },
     { zex_notepad, zex_notepad_size },
@@ -91,6 +134,9 @@ extern "C" void zex_interrupt_handler();
 extern "C" void zex_exit_trampoline();
 extern "C" void zex_call_entry(uint64_t entry);
 extern "C" void zex_syscall_dispatch(ZexRegisterFrame* registers);
+
+static void run_zex_file_manager();
+static void render_zex_window();
 
 static inline void copy_to_framebuffer(
     volatile uint32_t* destination,
@@ -628,9 +674,75 @@ static void draw_zex_window() {
         x + 20, y + 64, zex_runtime.window_width - 40,
         zex_runtime.window_height - 84, 8, 0x152C43, 0x0D1C2C
     );
-    draw_text(zex_runtime.message, x + 38, y + 90, 1, 0xE3EDF7);
-    draw_text("点击右上角按钮或按 Alt+F4 关闭", x + 24,
-              y + zex_runtime.window_height - 42, 1, 0x9BB1C8);
+    if (zex_runtime.file_manager) {
+        draw_text(file_manager_status, x + 38, y + 76, 1, 0xE3EDF7);
+        fill_rounded_rect_gradient(
+            x + 38, y + 106, 140, 32, 6, 0x28618C, 0x17466D
+        );
+        draw_text("数据盘 A:", x + 48, y + 110, 1,
+                  file_manager_volume_index == 0 ? 0xFFFFFF : 0xA9C3D8);
+        fill_rounded_rect_gradient(
+            x + 190, y + 106, 188, 32, 6, 0x28618C, 0x17466D
+        );
+        draw_text("共享目录 B:", x + 200, y + 110, 1,
+                  file_manager_volume_index == 1 ? 0xFFFFFF : 0xA9C3D8);
+        fill_rounded_rect_gradient(
+            x + zex_runtime.window_width - 154, y + 106, 112, 32, 6,
+            0x315A7D, 0x1B3D5B
+        );
+        draw_text("上一级", x + zex_runtime.window_width - 136, y + 110,
+                  1, 0xFFFFFF);
+
+        const int first_row_y = y + 148;
+        for (uint32_t index = 0; index < file_manager_entry_count; ++index) {
+            const int row_y = first_row_y + static_cast<int>(index) * 25;
+            if (index == file_manager_selected) {
+                fill_rounded_rect_gradient(
+                    x + 32, row_y, zex_runtime.window_width - 64, 24, 5,
+                    0x28618C, 0x17466D
+                );
+            }
+            draw_text(file_manager_entries[index].directory ? "文件夹" : "文件",
+                      x + 42, row_y + 2, 1,
+                      file_manager_entries[index].directory ? 0x75D8FF : 0xA9C3D8);
+            draw_text(file_manager_entries[index].name, x + 142, row_y + 2,
+                      1, 0xFFFFFF);
+            if (!file_manager_entries[index].directory) {
+                char size_text[16];
+                uint32_t value = file_manager_entries[index].size;
+                uint32_t length = 0;
+                do {
+                    size_text[length++] = static_cast<char>('0' + value % 10);
+                    value /= 10;
+                } while (value != 0 && length < sizeof(size_text) - 1);
+                for (uint32_t digit = 0; digit < length / 2; ++digit) {
+                    const char temporary = size_text[digit];
+                    size_text[digit] = size_text[length - digit - 1];
+                    size_text[length - digit - 1] = temporary;
+                }
+                size_text[length] = '\0';
+                draw_text(size_text, x + zex_runtime.window_width - 150,
+                          row_y + 2, 1, 0x9BB1C8);
+            }
+        }
+        if (file_manager_entry_count == 0) {
+            draw_text(!file_manager_volumes[file_manager_volume_index].mounted
+                          ? "卷未挂载或文件系统无效"
+                          : (file_manager_read_error ? "读取目录失败" : "此文件夹为空"),
+                      x + 48, first_row_y + 4, 1, 0xA9C3D8);
+        }
+        if (file_manager_entries_truncated) {
+            draw_text("列表已达到显示上限", x + 42,
+                      first_row_y + static_cast<int>(file_manager_entry_count) * 25 + 2,
+                      1, 0xFFD479);
+        }
+        draw_text("单击选择  Enter打开  Backspace返回  Tab切换卷  Alt+F4关闭",
+                  x + 24, y + zex_runtime.window_height - 42, 1, 0x9BB1C8);
+    } else {
+        draw_text(zex_runtime.message, x + 38, y + 90, 1, 0xE3EDF7);
+        draw_text("点击右上角按钮或按 Alt+F4 关闭", x + 24,
+                  y + zex_runtime.window_height - 42, 1, 0x9BB1C8);
+    }
     present_backbuffer();
 }
 
@@ -650,6 +762,347 @@ static void out16(uint16_t port, uint16_t value) {
 
 static void out32(uint16_t port, uint32_t value) {
     __asm__ volatile("outl %0, %1" : : "a"(value), "Nd"(port));
+}
+
+static uint16_t in16(uint16_t port) {
+    uint16_t value;
+    __asm__ volatile("inw %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+
+static uint16_t read_le16(const uint8_t* bytes, uint32_t offset) {
+    return static_cast<uint16_t>(bytes[offset]) |
+           (static_cast<uint16_t>(bytes[offset + 1]) << 8);
+}
+
+static uint32_t read_le32(const uint8_t* bytes, uint32_t offset) {
+    return static_cast<uint32_t>(bytes[offset]) |
+           (static_cast<uint32_t>(bytes[offset + 1]) << 8) |
+           (static_cast<uint32_t>(bytes[offset + 2]) << 16) |
+           (static_cast<uint32_t>(bytes[offset + 3]) << 24);
+}
+
+static bool ata_wait(uint16_t base, bool require_data) {
+    for (uint32_t attempt = 0; attempt < 1000000; ++attempt) {
+        const uint8_t status = in8(base + 7);
+        if (status == 0 || status == 0xFF) return false;
+        if ((status & 0x80) != 0) continue;
+        if ((status & 0x21) != 0) return false;
+        if (!require_data || (status & 0x08) != 0) return true;
+    }
+    return false;
+}
+
+static bool ata_read_sector(uint8_t drive, uint32_t lba, uint8_t* destination) {
+    const uint16_t base = drive < 2 ? 0x1F0 : 0x170;
+    const uint8_t unit = drive & 1;
+    if (lba >= 0x10000000) return false;
+
+    out8(base + 6, static_cast<uint8_t>(
+        0xE0 | (unit << 4) | ((lba >> 24) & 0x0F)
+    ));
+    for (uint32_t delay = 0; delay < 4; ++delay) {
+        (void)in8(base + 0x206);
+    }
+    if (!ata_wait(base, false)) return false;
+    out8(base + 2, 1);
+    out8(base + 3, static_cast<uint8_t>(lba));
+    out8(base + 4, static_cast<uint8_t>(lba >> 8));
+    out8(base + 5, static_cast<uint8_t>(lba >> 16));
+    out8(base + 7, 0x20);
+    if (!ata_wait(base, true)) return false;
+
+    uint16_t* words = reinterpret_cast<uint16_t*>(destination);
+    for (uint32_t index = 0; index < 256; ++index) {
+        words[index] = in16(base);
+    }
+    return ata_wait(base, false);
+}
+
+static bool mount_fat_volume(FatVolume& volume) {
+    volume.mounted = false;
+    volume.partition_start = 0;
+    volume.partition_sectors = 0;
+    if (!ata_read_sector(volume.ata_drive, 0, ata_sector_buffer) ||
+        ata_sector_buffer[510] != 0x55 || ata_sector_buffer[511] != 0xAA) {
+        return false;
+    }
+
+    if (read_le16(ata_sector_buffer, 11) != 512) {
+        bool found_partition = false;
+        for (uint32_t index = 0; index < 4; ++index) {
+            const uint32_t offset = 446 + index * 16;
+            const uint8_t type = ata_sector_buffer[offset + 4];
+            const bool fat_partition = type == 0x01 || type == 0x04 ||
+                type == 0x06 || type == 0x0B || type == 0x0C ||
+                type == 0x0E;
+            const uint32_t start = read_le32(ata_sector_buffer, offset + 8);
+            const uint32_t sectors = read_le32(ata_sector_buffer, offset + 12);
+            if (!fat_partition || start == 0 || sectors == 0) continue;
+            if (!ata_read_sector(volume.ata_drive, start, ata_sector_buffer) ||
+                read_le16(ata_sector_buffer, 11) != 512 ||
+                ata_sector_buffer[510] != 0x55 ||
+                ata_sector_buffer[511] != 0xAA) {
+                return false;
+            }
+            volume.partition_start = start;
+            volume.partition_sectors = sectors;
+            found_partition = true;
+            break;
+        }
+        if (!found_partition) return false;
+    }
+
+    volume.sectors_per_cluster = ata_sector_buffer[13];
+    volume.reserved_sectors = read_le16(ata_sector_buffer, 14);
+    volume.fat_count = ata_sector_buffer[16];
+    volume.root_entry_count = read_le16(ata_sector_buffer, 17);
+    volume.total_sectors = read_le16(ata_sector_buffer, 19);
+    if (volume.total_sectors == 0) {
+        volume.total_sectors = read_le32(ata_sector_buffer, 32);
+    }
+    volume.fat_sectors = read_le16(ata_sector_buffer, 22);
+    if (volume.fat_sectors == 0) {
+        volume.fat_sectors = read_le32(ata_sector_buffer, 36);
+    }
+    volume.root_cluster = read_le32(ata_sector_buffer, 44) & 0x0FFFFFFF;
+
+    if (volume.sectors_per_cluster == 0 ||
+        (volume.sectors_per_cluster & (volume.sectors_per_cluster - 1)) != 0 ||
+        volume.reserved_sectors == 0 || volume.fat_count == 0 ||
+        volume.fat_sectors == 0 || volume.total_sectors == 0) {
+        return false;
+    }
+
+    volume.root_sectors =
+        (static_cast<uint32_t>(volume.root_entry_count) * 32 + 511) / 512;
+    volume.root_sector = volume.reserved_sectors +
+                         volume.fat_count * volume.fat_sectors;
+    volume.data_sector = volume.root_sector + volume.root_sectors;
+    if (volume.data_sector >= volume.total_sectors ||
+        (volume.partition_sectors != 0 &&
+         volume.total_sectors > volume.partition_sectors)) return false;
+
+    const uint32_t cluster_count =
+        (volume.total_sectors - volume.data_sector) /
+        volume.sectors_per_cluster;
+    volume.fat_type = cluster_count < 4085 ? 12 :
+                      (cluster_count < 65525 ? 16 : 32);
+    if (volume.fat_type == 32 && volume.root_cluster < 2) return false;
+    volume.mounted = true;
+    return true;
+}
+
+static bool read_fat_byte(const FatVolume& volume, uint32_t offset, uint8_t& value) {
+    const uint32_t sector = offset / 512;
+    if (sector >= volume.fat_sectors ||
+        !ata_read_sector(volume.ata_drive,
+                         volume.partition_start + volume.reserved_sectors + sector,
+                         fat_sector_buffer)) {
+        return false;
+    }
+    value = fat_sector_buffer[offset & 511];
+    return true;
+}
+
+static bool read_fat_entry(
+    const FatVolume& volume,
+    uint32_t cluster,
+    uint32_t& next_cluster
+) {
+    uint32_t offset;
+    if (volume.fat_type == 12) {
+        offset = cluster + cluster / 2;
+        uint8_t low;
+        uint8_t high;
+        if (!read_fat_byte(volume, offset, low) ||
+            !read_fat_byte(volume, offset + 1, high)) return false;
+        next_cluster = static_cast<uint32_t>(low) |
+                       (static_cast<uint32_t>(high) << 8);
+        next_cluster = (cluster & 1) != 0
+            ? next_cluster >> 4 : next_cluster & 0x0FFF;
+    } else if (volume.fat_type == 16) {
+        offset = cluster * 2;
+        uint8_t low;
+        uint8_t high;
+        if (!read_fat_byte(volume, offset, low) ||
+            !read_fat_byte(volume, offset + 1, high)) return false;
+        next_cluster = static_cast<uint32_t>(low) |
+                       (static_cast<uint32_t>(high) << 8);
+    } else {
+        offset = cluster * 4;
+        uint8_t bytes[4];
+        for (uint32_t index = 0; index < 4; ++index) {
+            if (!read_fat_byte(volume, offset + index, bytes[index])) return false;
+        }
+        next_cluster = read_le32(bytes, 0) & 0x0FFFFFFF;
+    }
+    return true;
+}
+
+static void append_utf8(char* destination, uint32_t capacity, uint32_t& length,
+                        uint32_t codepoint) {
+    if (codepoint < 0x80) {
+        if (length + 1 < capacity) destination[length++] = static_cast<char>(codepoint);
+    } else if (codepoint < 0x800) {
+        if (length + 2 < capacity) {
+            destination[length++] = static_cast<char>(0xC0 | (codepoint >> 6));
+            destination[length++] = static_cast<char>(0x80 | (codepoint & 0x3F));
+        }
+    } else {
+        if (length + 3 < capacity) {
+            destination[length++] = static_cast<char>(0xE0 | (codepoint >> 12));
+            destination[length++] = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+            destination[length++] = static_cast<char>(0x80 | (codepoint & 0x3F));
+        }
+    }
+}
+
+static void copy_fat_name(
+    const uint8_t* entry,
+    const uint16_t* long_name,
+    char* destination,
+    uint32_t capacity
+) {
+    uint32_t output = 0;
+    if (long_name[0] != 0xFFFF && long_name[0] != 0) {
+        for (uint32_t index = 0; index < 260; ++index) {
+            uint32_t codepoint = long_name[index];
+            if (codepoint == 0 || codepoint == 0xFFFF) break;
+            if (codepoint >= 0xD800 && codepoint <= 0xDBFF &&
+                index + 1 < 260 && long_name[index + 1] >= 0xDC00 &&
+                long_name[index + 1] <= 0xDFFF) {
+                codepoint = 0x10000 + ((codepoint - 0xD800) << 10) +
+                            (long_name[++index] - 0xDC00);
+            }
+            append_utf8(destination, capacity, output, codepoint);
+        }
+    } else {
+        for (uint32_t index = 0; index < 8 && entry[index] != ' '; ++index) {
+            if (entry[index] == 0x05) destination[output++] = static_cast<char>(0xE5);
+            else if (output + 1 < capacity) destination[output++] = entry[index];
+        }
+        uint32_t extension_end = 11;
+        while (extension_end > 8 && entry[extension_end - 1] == ' ') --extension_end;
+        if (extension_end > 8 && output + 1 < capacity) {
+            destination[output++] = '.';
+            for (uint32_t index = 8; index < extension_end && output + 1 < capacity; ++index) {
+                destination[output++] = entry[index];
+            }
+        }
+    }
+    destination[output < capacity ? output : capacity - 1] = '\0';
+}
+
+static void store_long_name_part(
+    const uint8_t* entry,
+    uint16_t* long_name
+) {
+    static const uint8_t offsets[13] = {
+        1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30
+    };
+    const uint32_t ordinal = entry[0] & 0x1F;
+    if (ordinal == 0 || ordinal > 20) return;
+    const uint32_t start = (ordinal - 1) * 13;
+    for (uint32_t index = 0; index < 13; ++index) {
+        long_name[start + index] = read_le16(entry, offsets[index]);
+    }
+}
+
+static bool add_file_manager_entry(
+    const uint8_t* raw,
+    const uint16_t* long_name
+) {
+    if (raw[0] == 0) return false;
+    if (raw[0] == 0xE5 || raw[11] == 0x0F ||
+        (raw[11] & 0x08) != 0 || raw[0] == '.') return true;
+    if (file_manager_entry_count >= file_manager_entry_limit) {
+        file_manager_entries_truncated = true;
+        return false;
+    }
+
+    FileManagerEntry& entry = file_manager_entries[file_manager_entry_count++];
+    copy_fat_name(raw, long_name, entry.name, sizeof(entry.name));
+    entry.directory = (raw[11] & 0x10) != 0;
+    entry.cluster = (static_cast<uint32_t>(read_le16(raw, 20)) << 16) |
+                    read_le16(raw, 26);
+    if (file_manager_volumes[file_manager_volume_index].fat_type != 32) {
+        entry.cluster &= 0xFFFF;
+    }
+    entry.size = read_le32(raw, 28);
+    return true;
+}
+
+static bool scan_directory_sector(
+    const uint8_t* sector,
+    uint16_t* long_name
+) {
+    for (uint32_t offset = 0; offset < 512; offset += 32) {
+        const uint8_t* raw = sector + offset;
+        if (raw[0] == 0) return false;
+        if (raw[11] == 0x0F) {
+            if ((raw[0] & 0x40) != 0) {
+                for (uint32_t index = 0; index < 260; ++index) {
+                    long_name[index] = 0xFFFF;
+                }
+            }
+            store_long_name_part(raw, long_name);
+        } else {
+            if (!add_file_manager_entry(raw, long_name)) return false;
+            for (uint32_t index = 0; index < 260; ++index) {
+                long_name[index] = 0xFFFF;
+            }
+        }
+    }
+    return true;
+}
+
+static bool load_file_manager_directory() {
+    const FatVolume& volume = file_manager_volumes[file_manager_volume_index];
+    file_manager_entry_count = 0;
+    file_manager_selected = 0;
+    file_manager_entries_truncated = false;
+    for (uint32_t index = 0; index < 260; ++index) {
+        file_manager_long_name[index] = 0xFFFF;
+    }
+    if (!volume.mounted) return false;
+
+    if (file_manager_directory_cluster == 0 && volume.fat_type != 32) {
+        for (uint32_t sector = 0; sector < volume.root_sectors; ++sector) {
+            if (!ata_read_sector(volume.ata_drive,
+                                 volume.partition_start + volume.root_sector + sector,
+                                 directory_sector_buffer)) return false;
+            if (!scan_directory_sector(directory_sector_buffer,
+                                       file_manager_long_name)) break;
+        }
+        return true;
+    }
+
+    uint32_t cluster = file_manager_directory_cluster == 0
+        ? volume.root_cluster : file_manager_directory_cluster;
+    for (uint32_t chain = 0; chain < volume.total_sectors; ++chain) {
+        if (cluster < 2) return false;
+        const uint32_t cluster_count =
+            (volume.total_sectors - volume.data_sector) /
+            volume.sectors_per_cluster;
+        if (cluster - 2 >= cluster_count) return false;
+        const uint32_t first_sector = volume.partition_start + volume.data_sector +
+            (cluster - 2) * volume.sectors_per_cluster;
+        if (first_sector >= volume.total_sectors) return false;
+        for (uint32_t sector = 0; sector < volume.sectors_per_cluster; ++sector) {
+            if (!ata_read_sector(volume.ata_drive, first_sector + sector,
+                                 directory_sector_buffer)) return false;
+            if (!scan_directory_sector(directory_sector_buffer,
+                                       file_manager_long_name)) return true;
+        }
+        uint32_t next;
+        if (!read_fat_entry(volume, cluster, next)) return false;
+        const uint32_t end_marker = volume.fat_type == 12 ? 0xFF8 :
+                                    (volume.fat_type == 16 ? 0xFFF8 : 0x0FFFFFF8);
+        if (next >= end_marker) return true;
+        cluster = next;
+    }
+    return false;
 }
 
 static void install_zex_syscall_gate() {
@@ -801,6 +1254,198 @@ static void copy_zex_literal(char* destination, uint32_t capacity, const char* s
     destination[index] = '\0';
 }
 
+static void append_text(char* destination, uint32_t capacity, const char* source) {
+    uint32_t length = 0;
+    while (length + 1 < capacity && destination[length] != '\0') ++length;
+    uint32_t index = 0;
+    while (length + 1 < capacity && source[index] != '\0') {
+        destination[length++] = source[index++];
+    }
+    destination[length] = '\0';
+}
+
+static void update_file_manager_path() {
+    copy_zex_literal(file_manager_status, sizeof(file_manager_status),
+                     file_manager_volume_index == 0 ? "A:\\" : "B:\\");
+    for (uint32_t index = 0; index < file_manager_parent_depth; ++index) {
+        append_text(file_manager_status, sizeof(file_manager_status),
+                    file_manager_parent_names[index]);
+        append_text(file_manager_status, sizeof(file_manager_status), "\\");
+    }
+}
+
+static void redraw_file_manager() {
+    update_file_manager_path();
+    file_manager_read_error = !load_file_manager_directory();
+    if (file_manager_read_error) {
+        file_manager_entry_count = 0;
+        file_manager_entries_truncated = false;
+    }
+    render_target = reinterpret_cast<uint32_t*>(backbuffer_address);
+    draw_desktop();
+    draw_zex_window();
+}
+
+static void switch_file_manager_volume(uint8_t volume_index) {
+    if (volume_index >= 2 || volume_index == file_manager_volume_index) return;
+    file_manager_volume_index = volume_index;
+    file_manager_directory_cluster = 0;
+    file_manager_parent_depth = 0;
+    redraw_file_manager();
+}
+
+static void file_manager_go_parent() {
+    if (file_manager_parent_depth == 0) return;
+    --file_manager_parent_depth;
+    file_manager_directory_cluster =
+        file_manager_parent_clusters[file_manager_parent_depth];
+    redraw_file_manager();
+}
+
+static void file_manager_open_selected() {
+    if (file_manager_selected >= file_manager_entry_count) return;
+    const FileManagerEntry& entry = file_manager_entries[file_manager_selected];
+    if (entry.directory) {
+        if (file_manager_parent_depth >= 16) {
+            copy_zex_literal(file_manager_status, sizeof(file_manager_status),
+                             "目录层级达到上限");
+            return;
+        }
+        file_manager_parent_clusters[file_manager_parent_depth] =
+            file_manager_directory_cluster;
+        copy_zex_literal(file_manager_parent_names[file_manager_parent_depth],
+                         sizeof(file_manager_parent_names[0]), entry.name);
+        ++file_manager_parent_depth;
+        file_manager_directory_cluster = entry.cluster;
+        redraw_file_manager();
+    }
+}
+
+static void file_manager_select_mouse_row() {
+    const int window_x =
+        (static_cast<int>(screen_width) - zex_runtime.window_width) / 2;
+    const int window_y =
+        (static_cast<int>(screen_height) - zex_runtime.window_height) / 2;
+    if (mouse_y >= window_y + 106 && mouse_y < window_y + 138) {
+        if (mouse_x >= window_x + 38 && mouse_x < window_x + 178) {
+            switch_file_manager_volume(0);
+        } else if (mouse_x >= window_x + 190 && mouse_x < window_x + 378) {
+            switch_file_manager_volume(1);
+        } else if (mouse_x >= window_x + zex_runtime.window_width - 154 &&
+                   mouse_x < window_x + zex_runtime.window_width - 42) {
+            file_manager_go_parent();
+        }
+        return;
+    }
+
+    const int first_row_y = window_y + 148;
+    if (mouse_y < first_row_y) return;
+    const uint32_t row =
+        static_cast<uint32_t>((mouse_y - first_row_y) / 25);
+    if (row >= file_manager_entry_count) return;
+    if (file_manager_selected != row) {
+        file_manager_selected = row;
+        redraw_file_manager();
+    }
+}
+
+static void handle_file_manager_key(uint8_t scan_code, bool extended) {
+    if (extended) {
+        if (scan_code == 0x48 && file_manager_entry_count != 0) {
+            if (file_manager_selected != 0) --file_manager_selected;
+            redraw_file_manager();
+        } else if (scan_code == 0x50 && file_manager_entry_count != 0) {
+            if (file_manager_selected + 1 < file_manager_entry_count) {
+                ++file_manager_selected;
+            }
+            redraw_file_manager();
+        }
+        return;
+    }
+
+    switch (scan_code) {
+    case 0x01:
+        zex_runtime.close_requested = true;
+        break;
+    case 0x0E:
+        file_manager_go_parent();
+        break;
+    case 0x0F:
+        switch_file_manager_volume(
+            static_cast<uint8_t>(1 - file_manager_volume_index)
+        );
+        break;
+    case 0x1C:
+        file_manager_open_selected();
+        break;
+    default:
+        break;
+    }
+}
+
+static void run_zex_file_manager() {
+    zex_runtime.file_manager = true;
+    zex_runtime.window_open = true;
+    zex_runtime.close_requested = false;
+    zex_runtime.window_width = 1120;
+    zex_runtime.window_height = 760;
+    copy_zex_literal(zex_runtime.title, sizeof(zex_runtime.title), "文件管理器");
+    file_manager_volumes[0].ata_drive = 2;
+    file_manager_volumes[1].ata_drive = 1;
+    mount_fat_volume(file_manager_volumes[0]);
+    mount_fat_volume(file_manager_volumes[1]);
+    file_manager_volume_index = 0;
+    file_manager_directory_cluster = 0;
+    file_manager_parent_depth = 0;
+    keyboard_extended = false;
+    keyboard_alt_down = false;
+    redraw_file_manager();
+    draw_mouse_cursor();
+
+    while (!zex_runtime.close_requested) {
+        const uint8_t status = in8(0x64);
+        if ((status & 1) == 0) {
+            __asm__ volatile("pause");
+            continue;
+        }
+
+        const uint8_t data = in8(0x60);
+        if ((status & 0x20) != 0) {
+            if (mouse_packet_stage == 0) {
+                if ((data & 0x08) != 0) {
+                    mouse_packet[0] = data;
+                    mouse_packet_stage = 1;
+                }
+            } else {
+                mouse_packet[mouse_packet_stage++] = data;
+                if (mouse_packet_stage == 3) {
+                    mouse_packet_stage = 0;
+                    handle_mouse_packet();
+                }
+            }
+        } else if (data == 0xE0) {
+            keyboard_extended = true;
+        } else {
+            const bool released = (data & 0x80) != 0;
+            const uint8_t scan_code = data & 0x7F;
+            const bool extended = keyboard_extended;
+            keyboard_extended = false;
+            if (!extended && scan_code == 0x38) {
+                keyboard_alt_down = !released;
+            } else if (!released && !extended && scan_code == 0x3E &&
+                       keyboard_alt_down) {
+                zex_runtime.close_requested = true;
+            } else if (!released) {
+                handle_file_manager_key(scan_code, extended);
+            }
+        }
+    }
+
+    restore_mouse_cursor();
+    zex_runtime.window_open = false;
+    zex_runtime.file_manager = false;
+}
+
 static void show_zex_load_error() {
     zex_runtime.window_open = true;
     zex_runtime.close_requested = false;
@@ -895,6 +1540,10 @@ extern "C" void zex_syscall_dispatch(ZexRegisterFrame* registers) {
         draw_desktop();
         draw_zex_window();
         draw_mouse_cursor();
+        registers->rax = 0;
+        break;
+    case 6:
+        run_zex_file_manager();
         registers->rax = 0;
         break;
     default:
@@ -1085,6 +1734,8 @@ static void handle_mouse_packet() {
                 mouse_x < window_x + zex_runtime.window_width - 16 &&
                 mouse_y >= window_y + 10 && mouse_y < window_y + 34) {
                 zex_runtime.close_requested = true;
+            } else if (zex_runtime.file_manager) {
+                file_manager_select_mouse_row();
             }
         } else {
             const int screen_bottom = static_cast<int>(screen_height);

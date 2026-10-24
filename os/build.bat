@@ -31,6 +31,10 @@ set "LD=%DEVCPP_BIN%\ld.exe"
 set "OBJCOPY=%DEVCPP_BIN%\objcopy.exe"
 if not exist "%OUT%" mkdir "%OUT%"
 
+echo [1/10] Preparing the persistent Nova data disk...
+python "%~dp0initialize_data_disk.py" "%OUT%\nova-data.img"
+if errorlevel 1 exit /b 1
+
 echo [1.5/9] Preparing the default Nova wallpaper...
 python "%~dp0generate_wallpaper.py" "%ROOT%\image\Wallpaper\img0.png" "%OUT%\wallpaper.rgb565"
 if errorlevel 1 exit /b 1
