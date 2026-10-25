@@ -233,19 +233,7 @@ static void draw_chinese_glyph(int glyph_index, int x, int y, int scale, uint32_
     const uint8_t* bitmap = chinese_glyph_bitmaps[glyph_index];
     for (int row = 0; row < 24; ++row) {
         for (int column = 0; column < 24; ++column) {
-            bool filled = false;
-            for (int dy = 0; dy < 2 && !filled; ++dy) {
-                for (int dx = 0; dx < 2; ++dx) {
-                    const int source_x = column * 2 + dx;
-                    const int source_y = row * 2 + dy;
-                    const uint8_t bits = bitmap[source_y * 6 + source_x / 8];
-                    if (bits & (0x80 >> (source_x & 7))) {
-                        filled = true;
-                        break;
-                    }
-                }
-            }
-            if (filled) {
+            if (bitmap[row * 3 + column / 8] & (0x80 >> (column & 7))) {
                 fill_rect(x + column * scale, y + row * scale, scale, scale, color);
             }
         }

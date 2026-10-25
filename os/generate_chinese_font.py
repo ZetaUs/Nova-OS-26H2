@@ -9,7 +9,8 @@ def main():
     glyphs_path, font_path, output_path = map(Path, sys.argv[1:])
     glyphs = list(dict.fromkeys(glyphs_path.read_text(encoding="utf-8")))
     font = font_path.read_bytes()
-    glyph_bytes = 48 * 48 // 8
+    source_glyph_bytes = 48 * 48 // 8
+    glyph_bytes = 24 * 24 // 8
     codepoints = []
     bitmaps = []
 
@@ -22,10 +23,26 @@ def main():
             continue
 
         zone, position = encoded[0] - 0xA0, encoded[1] - 0xA0
-        offset = ((zone - 1) * 94 + position - 1) * glyph_bytes
-        bitmap = font[offset:offset + glyph_bytes]
-        if len(bitmap) != glyph_bytes:
+        offset = ((zone - 1) * 94 + position - 1) * source_glyph_bytes
+        source_bitmap = font[offset:offset + source_glyph_bytes]
+        if len(source_bitmap) != source_glyph_bytes:
             raise ValueError("The HZK48 font is missing glyph U+{:04X}".format(ord(character)))
+        bitmap = bytearray(glyph_bytes)
+        for row in range(24):
+            for column in range(24):
+                filled = False
+                for dy in range(2):
+                    for dx in range(2):
+                        source_x = column * 2 + dx
+                        source_y = row * 2 + dy
+                        source_byte = source_bitmap[source_y * 6 + source_x // 8]
+                        if source_byte & (0x80 >> (source_x & 7)):
+                            filled = True
+                            break
+                    if filled:
+                        break
+                if filled:
+                    bitmap[row * 3 + column // 8] |= 0x80 >> (column & 7)
         codepoints.append(ord(character))
         bitmaps.append(bitmap)
 
@@ -37,7 +54,7 @@ def main():
         "static const uint32_t chinese_glyph_codepoints[CHINESE_GLYPH_COUNT] = {",
         "    " + ", ".join("0x{:04X}".format(value) for value in codepoints),
         "};",
-        "static const uint8_t chinese_glyph_bitmaps[CHINESE_GLYPH_COUNT][288] = {",
+        "static const uint8_t chinese_glyph_bitmaps[CHINESE_GLYPH_COUNT][72] = {",
     ]
 
     for bitmap in bitmaps:
