@@ -80,7 +80,7 @@ echo [7/9] Compiling the freestanding 64-bit kernel with Dev-C++ MinGW...
 if errorlevel 1 exit /b 1
 
 echo [8/9] Linking and flattening the kernel image...
-"%LD%" -mi386pep --image-base 0 --section-alignment 16 --file-alignment 16 --section-start .text=0x10000 -e kernel_entry -o "%OUT%\kernel.exe" "%OUT%\kernel_entry.o" "%OUT%\kernel.o"
+"%LD%" -mi386pep --image-base 0 --section-alignment 16 --file-alignment 16 --section-start .text=0x10000 --section-start .bss=0x600000 -e kernel_entry -o "%OUT%\kernel.exe" "%OUT%\kernel_entry.o" "%OUT%\kernel.o"
 if errorlevel 1 exit /b 1
 "%OBJCOPY%" --only-section=.text --only-section=.rdata --only-section=.data -O binary "%OUT%\kernel.exe" "%OUT%\kernel.bin"
 if errorlevel 1 exit /b 1

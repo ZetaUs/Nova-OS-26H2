@@ -40,7 +40,7 @@ static uint32_t mouse_cursor_background[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT
 static uint8_t mouse_cursor_coverage[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT];
 static uint8_t mouse_cursor_shade[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT];
 static const uintptr_t backbuffer_address = 0x01000000;
-static const uintptr_t wallpaper_address = 0x00040000;
+static const uintptr_t wallpaper_address = 0x00020000;
 static const uintptr_t zex_load_address = 0x00400000;
 static const uint32_t file_manager_visible_entries = 20;
 static const uint32_t file_manager_entry_limit = 128;
