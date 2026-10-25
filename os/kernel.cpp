@@ -41,7 +41,8 @@ static uint8_t mouse_cursor_coverage[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT];
 static uint8_t mouse_cursor_shade[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT];
 static const uintptr_t backbuffer_address = 0x01000000;
 static const uintptr_t zex_load_address = 0x00400000;
-static const uint32_t file_manager_entry_limit = 20;
+static const uint32_t file_manager_visible_entries = 20;
+static const uint32_t file_manager_entry_limit = 128;
 
 struct ZexRegisterFrame {
     uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
@@ -110,6 +111,7 @@ static FatVolume file_manager_volumes[2];
 static FileManagerEntry file_manager_entries[file_manager_entry_limit];
 static uint32_t file_manager_entry_count;
 static uint32_t file_manager_selected;
+static uint32_t file_manager_scroll;
 static uint32_t file_manager_directory_cluster;
 static uint32_t file_manager_parent_clusters[16];
 static char file_manager_parent_names[16][64];
@@ -694,8 +696,11 @@ static void draw_zex_window() {
                   1, 0xFFFFFF);
 
         const int first_row_y = y + 148;
-        for (uint32_t index = 0; index < file_manager_entry_count; ++index) {
-            const int row_y = first_row_y + static_cast<int>(index) * 25;
+        uint32_t visible_count = 0;
+        while (visible_count < file_manager_visible_entries &&
+               file_manager_scroll + visible_count < file_manager_entry_count) {
+            const uint32_t index = file_manager_scroll + visible_count;
+            const int row_y = first_row_y + static_cast<int>(visible_count) * 25;
             if (index == file_manager_selected) {
                 fill_rounded_rect_gradient(
                     x + 32, row_y, zex_runtime.window_width - 64, 24, 5,
@@ -724,6 +729,7 @@ static void draw_zex_window() {
                 draw_text(size_text, x + zex_runtime.window_width - 150,
                           row_y + 2, 1, 0x9BB1C8);
             }
+            ++visible_count;
         }
         if (file_manager_entry_count == 0) {
             draw_text(!file_manager_volumes[file_manager_volume_index].mounted
@@ -732,8 +738,8 @@ static void draw_zex_window() {
                       x + 48, first_row_y + 4, 1, 0xA9C3D8);
         }
         if (file_manager_entries_truncated) {
-            draw_text("列表已达到显示上限", x + 42,
-                      first_row_y + static_cast<int>(file_manager_entry_count) * 25 + 2,
+            draw_text("列表已达到128项上限", x + 42,
+                      first_row_y + static_cast<int>(visible_count) * 25 + 2,
                       1, 0xFFD479);
         }
         draw_text("单击选择  Enter打开  Backspace返回  Tab切换卷  Alt+F4关闭",
@@ -1061,6 +1067,7 @@ static bool load_file_manager_directory() {
     const FatVolume& volume = file_manager_volumes[file_manager_volume_index];
     file_manager_entry_count = 0;
     file_manager_selected = 0;
+    file_manager_scroll = 0;
     file_manager_entries_truncated = false;
     for (uint32_t index = 0; index < 260; ++index) {
         file_manager_long_name[index] = 0xFFFF;
@@ -1276,14 +1283,19 @@ static void update_file_manager_path() {
 
 static void redraw_file_manager() {
     update_file_manager_path();
-    file_manager_read_error = !load_file_manager_directory();
-    if (file_manager_read_error) {
-        file_manager_entry_count = 0;
-        file_manager_entries_truncated = false;
-    }
     render_target = reinterpret_cast<uint32_t*>(backbuffer_address);
     draw_desktop();
     draw_zex_window();
+}
+
+static void reload_file_manager_directory() {
+    file_manager_read_error = !load_file_manager_directory();
+    if (file_manager_read_error) {
+        file_manager_entry_count = 0;
+        file_manager_scroll = 0;
+        file_manager_entries_truncated = false;
+    }
+    redraw_file_manager();
 }
 
 static void switch_file_manager_volume(uint8_t volume_index) {
@@ -1291,7 +1303,7 @@ static void switch_file_manager_volume(uint8_t volume_index) {
     file_manager_volume_index = volume_index;
     file_manager_directory_cluster = 0;
     file_manager_parent_depth = 0;
-    redraw_file_manager();
+    reload_file_manager_directory();
 }
 
 static void file_manager_go_parent() {
@@ -1299,7 +1311,7 @@ static void file_manager_go_parent() {
     --file_manager_parent_depth;
     file_manager_directory_cluster =
         file_manager_parent_clusters[file_manager_parent_depth];
-    redraw_file_manager();
+    reload_file_manager_directory();
 }
 
 static void file_manager_open_selected() {
@@ -1317,7 +1329,7 @@ static void file_manager_open_selected() {
                          sizeof(file_manager_parent_names[0]), entry.name);
         ++file_manager_parent_depth;
         file_manager_directory_cluster = entry.cluster;
-        redraw_file_manager();
+        reload_file_manager_directory();
     }
 }
 
@@ -1342,9 +1354,11 @@ static void file_manager_select_mouse_row() {
     if (mouse_y < first_row_y) return;
     const uint32_t row =
         static_cast<uint32_t>((mouse_y - first_row_y) / 25);
-    if (row >= file_manager_entry_count) return;
-    if (file_manager_selected != row) {
-        file_manager_selected = row;
+    const uint32_t index = file_manager_scroll + row;
+    if (row >= file_manager_visible_entries ||
+        index >= file_manager_entry_count) return;
+    if (file_manager_selected != index) {
+        file_manager_selected = index;
         redraw_file_manager();
     }
 }
@@ -1353,11 +1367,33 @@ static void handle_file_manager_key(uint8_t scan_code, bool extended) {
     if (extended) {
         if (scan_code == 0x48 && file_manager_entry_count != 0) {
             if (file_manager_selected != 0) --file_manager_selected;
+            if (file_manager_selected < file_manager_scroll) {
+                file_manager_scroll = file_manager_selected;
+            }
             redraw_file_manager();
         } else if (scan_code == 0x50 && file_manager_entry_count != 0) {
             if (file_manager_selected + 1 < file_manager_entry_count) {
                 ++file_manager_selected;
             }
+            if (file_manager_selected >=
+                file_manager_scroll + file_manager_visible_entries) {
+                file_manager_scroll =
+                    file_manager_selected - file_manager_visible_entries + 1;
+            }
+            redraw_file_manager();
+        } else if (scan_code == 0x49 && file_manager_entry_count != 0) {
+            file_manager_selected = file_manager_selected > file_manager_visible_entries
+                ? file_manager_selected - file_manager_visible_entries : 0;
+            file_manager_scroll = file_manager_selected;
+            redraw_file_manager();
+        } else if (scan_code == 0x51 && file_manager_entry_count != 0) {
+            const uint32_t last_entry = file_manager_entry_count - 1;
+            file_manager_selected = file_manager_selected + file_manager_visible_entries
+                < last_entry ? file_manager_selected + file_manager_visible_entries
+                             : last_entry;
+            file_manager_scroll =
+                file_manager_selected >= file_manager_visible_entries
+                    ? file_manager_selected - file_manager_visible_entries + 1 : 0;
             redraw_file_manager();
         }
         return;
@@ -1399,7 +1435,7 @@ static void run_zex_file_manager() {
     file_manager_parent_depth = 0;
     keyboard_extended = false;
     keyboard_alt_down = false;
-    redraw_file_manager();
+    reload_file_manager_directory();
     draw_mouse_cursor();
 
     while (!zex_runtime.close_requested) {
