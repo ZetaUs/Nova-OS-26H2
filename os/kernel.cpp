@@ -40,6 +40,8 @@ static uint32_t mouse_cursor_background[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT
 static uint8_t mouse_cursor_coverage[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT];
 static uint8_t mouse_cursor_shade[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT];
 static const uintptr_t backbuffer_address = 0x01000000;
+// Preserve the clean desktop so overlays only need to redraw their own bounds.
+static const uintptr_t desktop_cache_address = 0x02000000;
 static const uintptr_t wallpaper_address = 0x00020000;
 static const uintptr_t zex_load_address = 0x00400000;
 static const uint32_t file_manager_visible_entries = 20;
@@ -571,6 +573,30 @@ static void present_rect(int x, int y, int width, int height) {
     }
 }
 
+static void restore_desktop_rect(int x, int y, int width, int height) {
+    const int left = x < 0 ? 0 : x;
+    const int top = y < 0 ? 0 : y;
+    const int right = x + width > static_cast<int>(screen_width)
+        ? static_cast<int>(screen_width) : x + width;
+    const int bottom = y + height > static_cast<int>(screen_height)
+        ? static_cast<int>(screen_height) : y + height;
+    const uint32_t row_stride = screen_pitch / 4;
+    const uint32_t* desktop = reinterpret_cast<const uint32_t*>(desktop_cache_address);
+    render_target = reinterpret_cast<uint32_t*>(backbuffer_address);
+    for (int row = top; row < bottom; ++row) {
+        volatile uint32_t* destination = reinterpret_cast<volatile uint32_t*>(
+            render_target + static_cast<uint32_t>(row) * row_stride + left
+        );
+        const uint32_t* source =
+            desktop + static_cast<uint32_t>(row) * row_stride + left;
+        copy_to_framebuffer(
+            destination,
+            source,
+            static_cast<uint32_t>(right - left)
+        );
+    }
+}
+
 static void draw_start_menu_actions() {
     const int restart_y = static_cast<int>(screen_height) - 264;
     const int shutdown_y = static_cast<int>(screen_height) - 204;
@@ -599,7 +625,8 @@ static void refresh_start_menu() {
         return;
     }
 
-    draw_desktop();
+    restore_desktop_rect(24, top, 570, 530);
+    present_rect(24, top, 570, 530);
 }
 
 static void draw_desktop() {
@@ -628,6 +655,17 @@ static void draw_desktop() {
     draw_text("26H2版", static_cast<int>(screen_width) - 130, static_cast<int>(screen_height) - 50, 1, 0x75D8FF);
 
     if (start_menu_open) draw_start_menu();
+    const uint32_t row_stride = screen_pitch / 4;
+    const uint32_t* source = render_target;
+    volatile uint32_t* destination =
+        reinterpret_cast<volatile uint32_t*>(desktop_cache_address);
+    for (uint32_t y = 0; y < screen_height; ++y) {
+        copy_to_framebuffer(
+            destination + y * row_stride,
+            source + y * row_stride,
+            screen_width
+        );
+    }
     present_backbuffer();
 }
 
@@ -739,7 +777,7 @@ static void draw_zex_window() {
         draw_text("点击右上角按钮或按 Alt+F4 关闭", x + 24,
                   y + zex_runtime.window_height - 42, 1, 0x9BB1C8);
     }
-    present_backbuffer();
+    present_rect(x, y, zex_runtime.window_width, zex_runtime.window_height);
 }
 
 static uint8_t in8(uint16_t port) {
@@ -1273,9 +1311,7 @@ static void update_file_manager_path() {
 
 static void redraw_file_manager() {
     update_file_manager_path();
-    render_target = reinterpret_cast<uint32_t*>(backbuffer_address);
-    draw_desktop();
-    draw_zex_window();
+    render_zex_window();
 }
 
 static void reload_file_manager_directory() {
@@ -1426,7 +1462,6 @@ static void run_zex_file_manager() {
     keyboard_extended = false;
     keyboard_alt_down = false;
     reload_file_manager_directory();
-    draw_mouse_cursor();
 
     while (!zex_runtime.close_requested) {
         const uint8_t status = in8(0x64);
@@ -1479,13 +1514,13 @@ static void show_zex_load_error() {
     zex_runtime.window_height = 240;
     copy_zex_literal(zex_runtime.title, sizeof(zex_runtime.title), "程序加载失败");
     copy_zex_literal(zex_runtime.message, sizeof(zex_runtime.message), "ZEX程序数据无效");
-    mouse_cursor_drawn = false;
-    draw_desktop();
-    draw_zex_window();
-    draw_mouse_cursor();
+    render_zex_window();
     wait_for_zex_key();
     zex_runtime.window_open = false;
-    draw_desktop();
+    const int x = (static_cast<int>(screen_width) - zex_runtime.window_width) / 2;
+    const int y = (static_cast<int>(screen_height) - zex_runtime.window_height) / 2;
+    restore_desktop_rect(x, y, zex_runtime.window_width, zex_runtime.window_height);
+    present_rect(x, y, zex_runtime.window_width, zex_runtime.window_height);
     draw_mouse_cursor();
 }
 
@@ -1510,13 +1545,19 @@ static void run_zex_program(uint32_t program_index) {
     zex_runtime.window_open = false;
     zex_runtime.close_requested = false;
     restore_mouse_cursor();
-    draw_desktop();
+    const int x = (static_cast<int>(screen_width) - zex_runtime.window_width) / 2;
+    const int y = (static_cast<int>(screen_height) - zex_runtime.window_height) / 2;
+    restore_desktop_rect(x, y, zex_runtime.window_width, zex_runtime.window_height);
+    present_rect(x, y, zex_runtime.window_width, zex_runtime.window_height);
     draw_mouse_cursor();
 }
 
 static void render_zex_window() {
     if (mouse_cursor_drawn) restore_mouse_cursor();
     if (!zex_runtime.window_open) return;
+    const int x = (static_cast<int>(screen_width) - zex_runtime.window_width) / 2;
+    const int y = (static_cast<int>(screen_height) - zex_runtime.window_height) / 2;
+    restore_desktop_rect(x, y, zex_runtime.window_width, zex_runtime.window_height);
     draw_zex_window();
     draw_mouse_cursor();
 }
@@ -1562,10 +1603,7 @@ extern "C" void zex_syscall_dispatch(ZexRegisterFrame* registers) {
             zex_runtime.window_height = static_cast<int>(screen_height) - 100;
         }
         zex_runtime.window_open = true;
-        mouse_cursor_drawn = false;
-        draw_desktop();
-        draw_zex_window();
-        draw_mouse_cursor();
+        render_zex_window();
         registers->rax = 0;
         break;
     case 6:
