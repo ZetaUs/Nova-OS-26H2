@@ -43,7 +43,8 @@ start:
     jc kernel_error
 
     mov word [wallpaper_remaining], 993
-    mov word [wallpaper_dap + 6], 0x2000
+    ; Keep the wallpaper beyond the kernel's loaded image and zeroed BSS.
+    mov word [wallpaper_dap + 6], 0x4000
     mov dword [wallpaper_dap + 8], 136
     mov dword [wallpaper_dap + 12], 0
 .read_wallpaper:
@@ -125,7 +126,7 @@ wallpaper_dap:
     db 0x10, 0
     dw 0
     dw 0
-    dw 0x2000
+    dw 0x4000
     dd 105
     dd 0
 

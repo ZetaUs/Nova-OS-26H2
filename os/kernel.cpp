@@ -40,6 +40,7 @@ static uint32_t mouse_cursor_background[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT
 static uint8_t mouse_cursor_coverage[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT];
 static uint8_t mouse_cursor_shade[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT];
 static const uintptr_t backbuffer_address = 0x01000000;
+static const uintptr_t wallpaper_address = 0x00040000;
 static const uintptr_t zex_load_address = 0x00400000;
 static const uint32_t file_manager_visible_entries = 20;
 static const uint32_t file_manager_entry_limit = 128;
@@ -509,7 +510,8 @@ static void draw_nova_mark(int x, int y) {
 }
 
 static void draw_wallpaper() {
-    const uint16_t* wallpaper = reinterpret_cast<const uint16_t*>(0x00020000);
+    const uint16_t* wallpaper =
+        reinterpret_cast<const uint16_t*>(wallpaper_address);
     const uint32_t row_stride = screen_pitch / 4;
     for (uint32_t y = 0; y < screen_height; ++y) {
         uint32_t* row = render_target + y * row_stride;

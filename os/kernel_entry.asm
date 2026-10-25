@@ -6,10 +6,26 @@ global zex_exit_trampoline
 global zex_call_entry
 extern kernel_main
 extern zex_syscall_dispatch
+extern __bss_start__
+extern __bss_end__
 
 section .text
 kernel_entry:
     mov rsp, 0x120008
+    push rcx
+    push rdx
+    push r8
+    push r9
+    cld
+    xor eax, eax
+    lea rdi, [rel __bss_start__]
+    lea rcx, [rel __bss_end__]
+    sub rcx, rdi
+    rep stosb
+    pop r9
+    pop r8
+    pop rdx
+    pop rcx
     sub rsp, 40
     mov dword [rsp + 32], 32
     call kernel_main
