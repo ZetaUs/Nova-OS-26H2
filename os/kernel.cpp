@@ -1786,7 +1786,7 @@ static void handle_mouse_packet() {
         }
     }
     mouse_buttons = buttons;
-    draw_mouse_cursor();
+    if (!mouse_cursor_drawn) draw_mouse_cursor();
 }
 
 extern "C" __attribute__((noreturn)) void kernel_main(
