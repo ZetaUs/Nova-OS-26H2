@@ -42,6 +42,14 @@ static uint8_t mouse_cursor_shade[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT];
 static const uintptr_t backbuffer_address = 0x01000000;
 // Preserve the clean desktop so overlays only need to redraw their own bounds.
 static const uintptr_t desktop_cache_address = 0x02000000;
+static const uintptr_t start_menu_cache_address = 0x02800000;
+static const uintptr_t zex_window_cache_address = 0x02940000;
+static const uint32_t start_menu_width = 570;
+static const uint32_t start_menu_height = 530;
+static const uint32_t zex_window_cache_width_limit = 600;
+static const uint32_t zex_window_cache_height_limit = 420;
+static const uint32_t zex_window_cache_slot_size =
+    zex_window_cache_width_limit * zex_window_cache_height_limit;
 static const uintptr_t wallpaper_address = 0x00020000;
 static const uintptr_t zex_load_address = 0x00400000;
 static const uint32_t file_manager_visible_entries = 20;
@@ -127,6 +135,13 @@ static uint16_t file_manager_long_name[260];
 static uint8_t ata_sector_buffer[512];
 static uint8_t fat_sector_buffer[512];
 static uint8_t directory_sector_buffer[512];
+static bool start_menu_cache_ready;
+static bool zex_window_cache_valid[5];
+static uint32_t zex_window_cache_width[5];
+static uint32_t zex_window_cache_height[5];
+static char zex_window_cache_title[5][sizeof(zex_runtime.title)];
+static char zex_window_cache_message[5][sizeof(zex_runtime.message)];
+static uint32_t active_zex_program;
 static const ZexProgram zex_programs[] = {
     { zex_filemgr, zex_filemgr_size },
     { zex_notepad, zex_notepad_size },
@@ -573,7 +588,14 @@ static void present_rect(int x, int y, int width, int height) {
     }
 }
 
-static void restore_desktop_rect(int x, int y, int width, int height) {
+static void copy_cached_rect(
+    uintptr_t source_address,
+    uint32_t source_stride,
+    int x,
+    int y,
+    int width,
+    int height
+) {
     const int left = x < 0 ? 0 : x;
     const int top = y < 0 ? 0 : y;
     const int right = x + width > static_cast<int>(screen_width)
@@ -581,19 +603,55 @@ static void restore_desktop_rect(int x, int y, int width, int height) {
     const int bottom = y + height > static_cast<int>(screen_height)
         ? static_cast<int>(screen_height) : y + height;
     const uint32_t row_stride = screen_pitch / 4;
-    const uint32_t* desktop = reinterpret_cast<const uint32_t*>(desktop_cache_address);
+    const uint32_t* source = reinterpret_cast<const uint32_t*>(source_address);
     render_target = reinterpret_cast<uint32_t*>(backbuffer_address);
     for (int row = top; row < bottom; ++row) {
         volatile uint32_t* destination = reinterpret_cast<volatile uint32_t*>(
             render_target + static_cast<uint32_t>(row) * row_stride + left
         );
-        const uint32_t* source =
-            desktop + static_cast<uint32_t>(row) * row_stride + left;
+        const uint32_t* source_row = source +
+            static_cast<uint32_t>(row - y) * source_stride + (left - x);
         copy_to_framebuffer(
             destination,
-            source,
+            source_row,
             static_cast<uint32_t>(right - left)
         );
+    }
+}
+
+static void restore_desktop_rect(int x, int y, int width, int height) {
+    const uintptr_t desktop_rect = desktop_cache_address +
+        (static_cast<uintptr_t>(y) * screen_width + static_cast<uint32_t>(x)) *
+            sizeof(uint32_t);
+    copy_cached_rect(
+        desktop_rect,
+        screen_width,
+        x,
+        y,
+        width,
+        height
+    );
+}
+
+static void cache_rect(
+    uintptr_t destination_address,
+    uint32_t destination_stride,
+    int x,
+    int y,
+    int width,
+    int height
+) {
+    const uint32_t row_stride = screen_pitch / 4;
+    const uint32_t* source = render_target;
+    uint32_t* destination = reinterpret_cast<uint32_t*>(destination_address);
+    for (int row = 0; row < height; ++row) {
+        const uint32_t* source_row =
+            source + static_cast<uint32_t>(y + row) * row_stride + x;
+        uint32_t* destination_row =
+            destination + static_cast<uint32_t>(row) * destination_stride;
+        for (int column = 0; column < width; ++column) {
+            destination_row[column] = source_row[column];
+        }
     }
 }
 
@@ -610,6 +668,16 @@ static void draw_start_menu_actions() {
 
 static void refresh_start_menu_actions() {
     render_target = reinterpret_cast<uint32_t*>(backbuffer_address);
+    if (start_menu_cache_ready) {
+        copy_cached_rect(
+            start_menu_cache_address,
+            start_menu_width,
+            24,
+            static_cast<int>(screen_height) - 618,
+            start_menu_width,
+            start_menu_height
+        );
+    }
     draw_start_menu_actions();
     present_rect(52, static_cast<int>(screen_height) - 264, 510, 112);
 }
@@ -620,7 +688,19 @@ static void refresh_start_menu() {
     render_target = reinterpret_cast<uint32_t*>(backbuffer_address);
     const int top = static_cast<int>(screen_height) - 618;
     if (start_menu_open) {
-        draw_start_menu();
+        if (start_menu_cache_ready) {
+            copy_cached_rect(
+                start_menu_cache_address,
+                start_menu_width,
+                24,
+                top,
+                start_menu_width,
+                start_menu_height
+            );
+            draw_start_menu_actions();
+        } else {
+            draw_start_menu();
+        }
         present_rect(24, top, 570, 530);
         return;
     }
@@ -654,7 +734,6 @@ static void draw_desktop() {
     fill_rect(static_cast<int>(screen_width) - 120, static_cast<int>(screen_height) - 52, 1, 30, 0x38516A);
     draw_text("26H2版", static_cast<int>(screen_width) - 130, static_cast<int>(screen_height) - 50, 1, 0x75D8FF);
 
-    if (start_menu_open) draw_start_menu();
     const uint32_t row_stride = screen_pitch / 4;
     const uint32_t* source = render_target;
     volatile uint32_t* destination =
@@ -665,6 +744,29 @@ static void draw_desktop() {
             source + y * row_stride,
             screen_width
         );
+    }
+    if (start_menu_open) {
+        draw_start_menu();
+    }
+    if (!start_menu_cache_ready && !start_menu_open) {
+        const int menu_x = 24;
+        const int menu_y = static_cast<int>(screen_height) - 618;
+        draw_start_menu();
+        cache_rect(
+            start_menu_cache_address,
+            start_menu_width,
+            menu_x,
+            menu_y,
+            start_menu_width,
+            start_menu_height
+        );
+        restore_desktop_rect(
+            menu_x,
+            menu_y,
+            start_menu_width,
+            start_menu_height
+        );
+        start_menu_cache_ready = true;
     }
     present_backbuffer();
 }
@@ -1527,6 +1629,7 @@ static void show_zex_load_error() {
 static void run_zex_program(uint32_t program_index) {
     if (program_index >= sizeof(zex_programs) / sizeof(zex_programs[0])) return;
 
+    active_zex_program = program_index;
     uint64_t entry = 0;
     if (!load_zex_program(zex_programs[program_index], entry)) {
         show_zex_load_error();
@@ -1558,7 +1661,65 @@ static void render_zex_window() {
     const int x = (static_cast<int>(screen_width) - zex_runtime.window_width) / 2;
     const int y = (static_cast<int>(screen_height) - zex_runtime.window_height) / 2;
     restore_desktop_rect(x, y, zex_runtime.window_width, zex_runtime.window_height);
-    draw_zex_window();
+
+    const uint32_t program = active_zex_program;
+    const bool cacheable = !zex_runtime.file_manager &&
+        program < sizeof(zex_window_cache_valid) / sizeof(zex_window_cache_valid[0]) &&
+        zex_runtime.window_width <= static_cast<int>(zex_window_cache_width_limit) &&
+        zex_runtime.window_height <= static_cast<int>(zex_window_cache_height_limit);
+    bool cache_matches = cacheable && zex_window_cache_valid[program] &&
+        zex_window_cache_width[program] == static_cast<uint32_t>(zex_runtime.window_width) &&
+        zex_window_cache_height[program] == static_cast<uint32_t>(zex_runtime.window_height);
+    for (uint32_t index = 0; cache_matches && index < sizeof(zex_runtime.title); ++index) {
+        if (zex_window_cache_title[program][index] != zex_runtime.title[index]) {
+            cache_matches = false;
+        }
+    }
+    for (uint32_t index = 0; cache_matches && index < sizeof(zex_runtime.message); ++index) {
+        if (zex_window_cache_message[program][index] != zex_runtime.message[index]) {
+            cache_matches = false;
+        }
+    }
+    const uintptr_t cache_address = zex_window_cache_address +
+        static_cast<uintptr_t>(program) * zex_window_cache_slot_size * sizeof(uint32_t);
+    if (cache_matches) {
+        copy_cached_rect(
+            cache_address,
+            zex_window_cache_width_limit,
+            x,
+            y,
+            zex_runtime.window_width,
+            zex_runtime.window_height
+        );
+        present_rect(x, y, zex_runtime.window_width, zex_runtime.window_height);
+    } else {
+        draw_zex_window();
+        if (cacheable) {
+            cache_rect(
+                cache_address,
+                zex_window_cache_width_limit,
+                x,
+                y,
+                zex_runtime.window_width,
+                zex_runtime.window_height
+            );
+            zex_window_cache_width[program] =
+                static_cast<uint32_t>(zex_runtime.window_width);
+            zex_window_cache_height[program] =
+                static_cast<uint32_t>(zex_runtime.window_height);
+            copy_zex_literal(
+                zex_window_cache_title[program],
+                sizeof(zex_window_cache_title[program]),
+                zex_runtime.title
+            );
+            copy_zex_literal(
+                zex_window_cache_message[program],
+                sizeof(zex_window_cache_message[program]),
+                zex_runtime.message
+            );
+            zex_window_cache_valid[program] = true;
+        }
+    }
     draw_mouse_cursor();
 }
 
