@@ -1004,17 +1004,25 @@ static bool mount_fat_volume(FatVolume& volume) {
     volume.root_cluster = read_le32(ata_sector_buffer, 44) & 0x0FFFFFFF;
 
     if (volume.sectors_per_cluster == 0 ||
+        volume.sectors_per_cluster > 128 ||
         (volume.sectors_per_cluster & (volume.sectors_per_cluster - 1)) != 0 ||
         volume.reserved_sectors == 0 || volume.fat_count == 0 ||
-        volume.fat_sectors == 0 || volume.total_sectors == 0) {
+        volume.fat_sectors == 0 || volume.total_sectors == 0 ||
+        volume.partition_start >= 0x10000000U ||
+        volume.total_sectors > 0x10000000U - volume.partition_start) {
         return false;
     }
 
     volume.root_sectors =
         (static_cast<uint32_t>(volume.root_entry_count) * 32 + 511) / 512;
-    volume.root_sector = volume.reserved_sectors +
-                         volume.fat_count * volume.fat_sectors;
-    volume.data_sector = volume.root_sector + volume.root_sectors;
+    const uint64_t root_sector =
+        static_cast<uint64_t>(volume.reserved_sectors) +
+        static_cast<uint64_t>(volume.fat_count) * volume.fat_sectors;
+    const uint64_t data_sector = root_sector + volume.root_sectors;
+    if (root_sector > volume.total_sectors ||
+        data_sector > volume.total_sectors) return false;
+    volume.root_sector = static_cast<uint32_t>(root_sector);
+    volume.data_sector = static_cast<uint32_t>(data_sector);
     if (volume.data_sector >= volume.total_sectors ||
         (volume.partition_sectors != 0 &&
          volume.total_sectors > volume.partition_sectors)) return false;
@@ -1022,9 +1030,12 @@ static bool mount_fat_volume(FatVolume& volume) {
     const uint32_t cluster_count =
         (volume.total_sectors - volume.data_sector) /
         volume.sectors_per_cluster;
+    if (cluster_count == 0) return false;
     volume.fat_type = cluster_count < 4085 ? 12 :
                       (cluster_count < 65525 ? 16 : 32);
-    if (volume.fat_type == 32 && volume.root_cluster < 2) return false;
+    if (volume.fat_type == 32 &&
+        (volume.root_entry_count != 0 || volume.root_cluster < 2 ||
+         volume.root_cluster - 2 >= cluster_count)) return false;
     volume.mounted = true;
     return true;
 }
@@ -1217,15 +1228,18 @@ static bool load_file_manager_directory() {
 
     uint32_t cluster = file_manager_directory_cluster == 0
         ? volume.root_cluster : file_manager_directory_cluster;
-    for (uint32_t chain = 0; chain < volume.total_sectors; ++chain) {
+    const uint32_t cluster_count =
+        (volume.total_sectors - volume.data_sector) /
+        volume.sectors_per_cluster;
+    for (uint32_t chain = 0; chain < cluster_count; ++chain) {
         if (cluster < 2) return false;
-        const uint32_t cluster_count =
-            (volume.total_sectors - volume.data_sector) /
-            volume.sectors_per_cluster;
         if (cluster - 2 >= cluster_count) return false;
-        const uint32_t first_sector = volume.partition_start + volume.data_sector +
+        const uint32_t relative_sector = volume.data_sector +
             (cluster - 2) * volume.sectors_per_cluster;
-        if (first_sector >= volume.total_sectors) return false;
+        if (relative_sector >= volume.total_sectors ||
+            volume.sectors_per_cluster >
+                volume.total_sectors - relative_sector) return false;
+        const uint32_t first_sector = volume.partition_start + relative_sector;
         for (uint32_t sector = 0; sector < volume.sectors_per_cluster; ++sector) {
             if (!ata_read_sector(volume.ata_drive, first_sector + sector,
                                  directory_sector_buffer)) return false;
