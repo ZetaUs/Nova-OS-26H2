@@ -99,7 +99,7 @@ for %%F in ("%OUT%\kernel.bin") do if %%~zF GTR 65024 (
 )
 
 echo [9/9] Creating the 64 MiB BIOS disk image...
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "try { $boot=[System.IO.File]::ReadAllBytes('%OUT%\boot.bin'); $stage2=[System.IO.File]::ReadAllBytes('%OUT%\stage2.bin'); $kernel=[System.IO.File]::ReadAllBytes('%OUT%\kernel.bin'); $wallpaper=[System.IO.File]::ReadAllBytes('%OUT%\wallpaper.rgb565'); if ($wallpaper.Length -ne 508032) { throw 'Wallpaper image must contain exactly 508032 bytes.' }; $img=New-Object byte[] (64*1024*1024); $boot.CopyTo($img,0); $stage2.CopyTo($img,512); $kernel.CopyTo($img,9*512); $wallpaper.CopyTo($img,136*512); [System.IO.File]::WriteAllBytes('%OUT%\nova-os-26h2.img',$img) } catch { Write-Error $_; exit 1 }"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "try { $boot=[System.IO.File]::ReadAllBytes('%OUT%\boot.bin'); $stage2=[System.IO.File]::ReadAllBytes('%OUT%\stage2.bin'); $kernel=[System.IO.File]::ReadAllBytes('%OUT%\kernel.bin'); $wallpaper=[System.IO.File]::ReadAllBytes('%OUT%\wallpaper.rgb565'); if ($wallpaper.Length -ne 4147200) { throw 'Wallpaper image must contain exactly 4147200 bytes.' }; $img=New-Object byte[] (64*1024*1024); $boot.CopyTo($img,0); $stage2.CopyTo($img,512); $kernel.CopyTo($img,9*512); $wallpaper.CopyTo($img,136*512); [System.IO.File]::WriteAllBytes('%OUT%\nova-os-26h2.img',$img) } catch { Write-Error $_; exit 1 }"
 if errorlevel 1 exit /b 1
 
 echo Built 64-bit Nova OS 26H2: %OUT%\nova-os-26h2.img

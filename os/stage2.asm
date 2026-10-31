@@ -42,7 +42,7 @@ start:
     int 0x13
     jc kernel_error
 
-    mov word [wallpaper_remaining], 993
+    mov word [wallpaper_remaining], 8100
     mov word [wallpaper_dap + 6], 0x2000
     mov dword [wallpaper_dap + 8], 136
     mov dword [wallpaper_dap + 12], 0

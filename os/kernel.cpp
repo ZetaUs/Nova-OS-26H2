@@ -52,6 +52,8 @@ static const uint32_t zex_window_cache_slot_size =
     zex_window_cache_width_limit * zex_window_cache_height_limit;
 static const uintptr_t wallpaper_address = 0x00020000;
 static const uintptr_t zex_load_address = 0x00400000;
+static const uint32_t wallpaper_width = 1920;
+static const uint32_t wallpaper_height = 1080;
 static const uint32_t file_manager_visible_entries = 20;
 static const uint32_t file_manager_entry_limit = 128;
 
@@ -532,10 +534,11 @@ static void draw_wallpaper() {
     const uint32_t row_stride = screen_pitch / 4;
     for (uint32_t y = 0; y < screen_height; ++y) {
         uint32_t* row = render_target + y * row_stride;
-        const uint32_t source_y = y * 7 / 20;
+        const uint32_t source_y = y * wallpaper_height / screen_height;
         for (uint32_t x = 0; x < screen_width; ++x) {
-            const uint32_t source_x = x * 7 / 20;
-            const uint16_t color = wallpaper[source_y * 672 + source_x];
+            const uint32_t source_x = x * wallpaper_width / screen_width;
+            const uint16_t color =
+                wallpaper[source_y * wallpaper_width + source_x];
             const uint32_t red5 = (color >> 11) & 31;
             const uint32_t green6 = (color >> 5) & 63;
             const uint32_t blue5 = color & 31;
