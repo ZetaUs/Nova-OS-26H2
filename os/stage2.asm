@@ -42,33 +42,6 @@ start:
     int 0x13
     jc kernel_error
 
-    mov word [wallpaper_remaining], 8100
-    mov word [wallpaper_dap + 6], 0x2000
-    mov dword [wallpaper_dap + 8], 136
-    mov dword [wallpaper_dap + 12], 0
-.read_wallpaper:
-    mov ax, [wallpaper_remaining]
-    cmp ax, 64
-    jbe .wallpaper_count_ready
-    mov ax, 64
-.wallpaper_count_ready:
-    mov [wallpaper_chunk], ax
-    mov [wallpaper_dap + 2], ax
-    mov si, wallpaper_dap
-    mov dl, [boot_drive]
-    mov ah, 0x42
-    int 0x13
-    jc wallpaper_error
-
-    movzx eax, word [wallpaper_chunk]
-    sub [wallpaper_remaining], ax
-    add [wallpaper_dap + 8], eax
-    adc dword [wallpaper_dap + 12], 0
-    shl ax, 5
-    add [wallpaper_dap + 6], ax
-    cmp word [wallpaper_remaining], 0
-    jne .read_wallpaper
-
     cli
     lgdt [gdt_descriptor]
     mov eax, cr0
@@ -83,9 +56,6 @@ vbe_error:
 kernel_error:
     mov si, kernel_error_message
     jmp print_error
-
-wallpaper_error:
-    mov si, wallpaper_error_message
 
 print_error:
     mov ah, 0x0E
@@ -121,20 +91,9 @@ kernel_dap:
     dd 9
     dd 0
 
-wallpaper_dap:
-    db 0x10, 0
-    dw 0
-    dw 0
-    dw 0x2000
-    dd 105
-    dd 0
-
 boot_drive: db 0
-wallpaper_remaining: dw 0
-wallpaper_chunk: dw 0
 vbe_error_message: db 'Nova OS: VBE mode unavailable', 0
 kernel_error_message: db 'Nova OS: kernel read failed', 0
-wallpaper_error_message: db 'Nova OS: wallpaper read failed', 0
 framebuffer_base: dd 0
 align 4
 vbe_mode_info: times 256 db 0

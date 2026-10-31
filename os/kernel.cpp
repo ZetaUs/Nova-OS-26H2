@@ -2,6 +2,7 @@ typedef unsigned char uint8_t;
 typedef signed char int8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
+typedef signed int int32_t;
 typedef unsigned long long uint64_t;
 typedef signed long long int64_t;
 typedef unsigned long long uintptr_t;
@@ -36,6 +37,8 @@ static bool mouse_cursor_drawn;
 static bool keyboard_extended;
 static bool keyboard_alt_down;
 static uint8_t menu_selection;
+static const uint32_t desktop_icon_source_size = 96;
+static const uint32_t desktop_icon_size = 120;
 static uint32_t mouse_cursor_background[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT];
 static uint8_t mouse_cursor_coverage[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT];
 static uint8_t mouse_cursor_shade[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT];
@@ -53,14 +56,13 @@ static const uint32_t zex_window_cache_width_limit = 600;
 static const uint32_t zex_window_cache_height_limit = 420;
 static const uint32_t zex_window_cache_slot_size =
     zex_window_cache_width_limit * zex_window_cache_height_limit;
-static const uintptr_t wallpaper_address = 0x00020000;
+static const uintptr_t wallpaper_address = 0x03000000;
+static const uint32_t wallpaper_lba = 136;
 static const uintptr_t zex_load_address = 0x00400000;
 static const uint32_t wallpaper_width = 1920;
 static const uint32_t wallpaper_height = 1080;
 static const uint32_t file_manager_visible_entries = 20;
 static const uint32_t file_manager_entry_limit = 128;
-static const uint32_t desktop_icon_source_size = 96;
-static const uint32_t desktop_icon_size = 120;
 
 struct ZexRegisterFrame {
     uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
@@ -189,56 +191,6 @@ static void initialize_mouse_cursor() {
             const int index = row * MOUSE_CURSOR_WIDTH + column;
             mouse_cursor_coverage[index] = mouse_cursor_alpha[index];
             mouse_cursor_shade[index] = mouse_cursor_luma[index];
-        }
-    }
-}
-
-static void draw_desktop_app_icon(int x, int y, uint8_t app) {
-    draw_desktop_app_icon_source(x, y, app);
-
-    const uint32_t row_stride = screen_pitch / 4;
-    for (uint32_t row = 0; row < desktop_icon_source_size; ++row) {
-        const uint32_t* source =
-            render_target + static_cast<uint32_t>(y + row) * row_stride + x;
-        uint32_t* destination =
-            desktop_icon_source + row * desktop_icon_source_size;
-        for (uint32_t column = 0; column < desktop_icon_source_size; ++column) {
-            destination[column] = source[column];
-        }
-    }
-
-    for (uint32_t row = 0; row < desktop_icon_size; ++row) {
-        const uint32_t source_y_fixed =
-            ((2 * row + 1) * desktop_icon_source_size * 32768 /
-             desktop_icon_size) - 32768;
-        const uint32_t source_y = source_y_fixed >> 16;
-        const uint32_t next_y = source_y < desktop_icon_source_size - 1
-            ? source_y + 1 : source_y;
-        const uint32_t fraction_y = source_y_fixed & 0xFFFF;
-        uint32_t* destination =
-            render_target + static_cast<uint32_t>(y + row) * row_stride + x;
-
-        for (uint32_t column = 0; column < desktop_icon_size; ++column) {
-            const uint32_t source_x_fixed =
-                ((2 * column + 1) * desktop_icon_source_size * 32768 /
-                 desktop_icon_size) - 32768;
-            const uint32_t source_x = source_x_fixed >> 16;
-            const uint32_t next_x = source_x < desktop_icon_source_size - 1
-                ? source_x + 1 : source_x;
-            const uint32_t fraction_x = source_x_fixed & 0xFFFF;
-            const uint32_t top = mix_color(
-                desktop_icon_source[source_y * desktop_icon_source_size + source_x],
-                desktop_icon_source[source_y * desktop_icon_source_size + next_x],
-                fraction_x,
-                65536
-            );
-            const uint32_t bottom = mix_color(
-                desktop_icon_source[next_y * desktop_icon_source_size + source_x],
-                desktop_icon_source[next_y * desktop_icon_source_size + next_x],
-                fraction_x,
-                65536
-            );
-            destination[column] = mix_color(top, bottom, fraction_y, 65536);
         }
     }
 }
@@ -568,9 +520,103 @@ static void draw_desktop_app_icon_source(int x, int y, uint8_t app) {
     }
 }
 
+static void draw_desktop_app_icon(int x, int y, uint8_t app) {
+    draw_desktop_app_icon_source(x, y, app);
+
+    const uint32_t row_stride = screen_pitch / 4;
+    for (uint32_t row = 0; row < desktop_icon_source_size; ++row) {
+        const uint32_t* source =
+            render_target + static_cast<uint32_t>(y + row) * row_stride + x;
+        uint32_t* destination =
+            desktop_icon_source + row * desktop_icon_source_size;
+        for (uint32_t column = 0; column < desktop_icon_source_size; ++column) {
+            destination[column] = source[column];
+        }
+    }
+
+    for (uint32_t row = 0; row < desktop_icon_size; ++row) {
+        const int32_t source_y_fixed = static_cast<int32_t>(
+            (2 * row + 1) * desktop_icon_source_size * 32768 /
+            desktop_icon_size
+        ) - 32768;
+        const uint32_t source_y = source_y_fixed <= 0
+            ? 0 : static_cast<uint32_t>(source_y_fixed) >> 16;
+        const uint32_t next_y = source_y < desktop_icon_source_size - 1
+            ? source_y + 1 : source_y;
+        const uint32_t fraction_y = source_y_fixed <= 0
+            ? 0 : static_cast<uint32_t>(source_y_fixed) & 0xFFFF;
+        uint32_t* destination =
+            render_target + static_cast<uint32_t>(y + row) * row_stride + x;
+
+        for (uint32_t column = 0; column < desktop_icon_size; ++column) {
+            const int32_t source_x_fixed = static_cast<int32_t>(
+                (2 * column + 1) * desktop_icon_source_size * 32768 /
+                desktop_icon_size
+            ) - 32768;
+            const uint32_t source_x = source_x_fixed <= 0
+                ? 0 : static_cast<uint32_t>(source_x_fixed) >> 16;
+            const uint32_t next_x = source_x < desktop_icon_source_size - 1
+                ? source_x + 1 : source_x;
+            const uint32_t fraction_x = source_x_fixed <= 0
+                ? 0 : static_cast<uint32_t>(source_x_fixed) & 0xFFFF;
+            const uint32_t top = mix_color(
+                desktop_icon_source[source_y * desktop_icon_source_size + source_x],
+                desktop_icon_source[source_y * desktop_icon_source_size + next_x],
+                fraction_x,
+                65536
+            );
+            const uint32_t bottom = mix_color(
+                desktop_icon_source[next_y * desktop_icon_source_size + source_x],
+                desktop_icon_source[next_y * desktop_icon_source_size + next_x],
+                fraction_x,
+                65536
+            );
+            destination[column] = mix_color(top, bottom, fraction_y, 65536);
+        }
+    }
+}
+
 static void draw_desktop_icon_label(const char* text, int center_x, int y, int characters) {
     const int text_width = characters * 24;
     draw_text(text, center_x - text_width / 2, y, 1, 0xFFFFFF);
+}
+
+static void draw_taskbar_app_icon(int x, int y, uint8_t app) {
+    fill_rounded_rect_gradient(x, y, 42, 48, 7, 0x24506F, 0x142C45);
+    if (app == 0) {
+        fill_rounded_rect_gradient(x + 9, y + 18, 25, 19, 4,
+                                   0xFFD66A, 0xD98A20);
+        fill_rounded_rect_gradient(x + 11, y + 13, 13, 8, 3,
+                                   0xFFF0A8, 0xEBAF3B);
+    } else if (app == 1) {
+        fill_rounded_rect_gradient(x + 11, y + 8, 20, 32, 3,
+                                   0xFFFFFF, 0xC9DFEE);
+        fill_rect(x + 15, y + 16, 12, 2, 0x2495D0);
+        fill_rect(x + 15, y + 22, 12, 2, 0x91ABC0);
+        fill_rect(x + 15, y + 28, 10, 2, 0x91ABC0);
+    } else if (app == 2) {
+        fill_rounded_rect_gradient(x + 8, y + 9, 26, 28, 13,
+                                   0x9DE8FF, 0x1672B8);
+        fill_rect(x + 20, y + 10, 2, 26, 0xE7F7FF);
+        fill_rect(x + 9, y + 22, 24, 2, 0xE7F7FF);
+    } else if (app == 3) {
+        fill_rounded_rect_gradient(x + 9, y + 10, 24, 26, 12,
+                                   0xE7F7FF, 0x8CBAD8);
+        fill_rounded_rect_gradient(x + 16, y + 17, 10, 12, 5,
+                                   0x17446C, 0x0B2F51);
+        fill_rect(x + 19, y + 7, 4, 7, 0xE7F7FF);
+        fill_rect(x + 19, y + 33, 4, 7, 0xE7F7FF);
+        fill_rect(x + 6, y + 21, 7, 4, 0xE7F7FF);
+        fill_rect(x + 29, y + 21, 7, 4, 0xE7F7FF);
+    } else {
+        fill_rounded_rect_gradient(x + 7, y + 11, 28, 24, 4,
+                                   0xE8F7FF, 0x9BCBE7);
+        fill_rounded_rect_gradient(x + 10, y + 14, 22, 17, 2,
+                                   0x13253B, 0x071421);
+        draw_triangle(x + 14, y + 18, x + 19, y + 22, x + 14, y + 26,
+                      0x65D7FF);
+        fill_rect(x + 21, y + 24, 7, 2, 0xA5F18B);
+    }
 }
 
 static void draw_nova_mark(int x, int y) {
@@ -788,6 +834,13 @@ static void draw_desktop() {
     draw_nova_mark(26, static_cast<int>(screen_height) - 60);
     fill_rect(92, static_cast<int>(screen_height) - 58, 1, 40, 0x38516A);
     draw_text("Nova", 116, static_cast<int>(screen_height) - 50, 1, 0xFFFFFF);
+    for (uint8_t app = 0; app < 5; ++app) {
+        draw_taskbar_app_icon(
+            178 + static_cast<int>(app) * 50,
+            static_cast<int>(screen_height) - 62,
+            app
+        );
+    }
     draw_text("64位", static_cast<int>(screen_width) - 220, static_cast<int>(screen_height) - 50, 1, 0xA8C4DB);
     fill_rect(static_cast<int>(screen_width) - 120, static_cast<int>(screen_height) - 52, 1, 30, 0x38516A);
     draw_text("26H2版", static_cast<int>(screen_width) - 130, static_cast<int>(screen_height) - 50, 1, 0x75D8FF);
@@ -1011,6 +1064,18 @@ static bool ata_read_sector(uint8_t drive, uint32_t lba, uint8_t* destination) {
         words[index] = in16(base);
     }
     return ata_wait(base, false);
+}
+
+static bool load_desktop_wallpaper() {
+    uint8_t* const destination =
+        reinterpret_cast<uint8_t*>(wallpaper_address);
+    const uint32_t sector_count =
+        wallpaper_width * wallpaper_height * sizeof(uint16_t) / 512;
+    for (uint32_t sector = 0; sector < sector_count; ++sector) {
+        if (!ata_read_sector(0, wallpaper_lba + sector,
+                             destination + sector * 512)) return false;
+    }
+    return true;
 }
 
 static bool mount_fat_volume(FatVolume& volume) {
@@ -2042,9 +2107,15 @@ static void handle_mouse_packet() {
             } else if (start_menu_open && mouse_x >= 52 && mouse_x < 562 &&
                        mouse_y >= screen_bottom - 204 && mouse_y < screen_bottom - 152) {
                 shutdown_system();
-            } else if (!start_menu_open && mouse_x >= 38 && mouse_x < 166 &&
+            } else if (!start_menu_open && mouse_x >= 38 && mouse_x < 190 &&
                        mouse_y >= 50 && mouse_y < 830) {
                 run_zex_program(static_cast<uint32_t>((mouse_y - 50) / 156));
+            } else if (!start_menu_open &&
+                       mouse_y >= screen_bottom - 62 &&
+                       mouse_y < screen_bottom - 14 &&
+                       mouse_x >= 178 && mouse_x < 428 &&
+                       (mouse_x - 178) % 50 < 42) {
+                run_zex_program(static_cast<uint32_t>((mouse_x - 178) / 50));
             } else if (mouse_x < 84 && mouse_y >= screen_bottom - 76) {
                 start_menu_open = !start_menu_open;
                 refresh_start_menu();
@@ -2088,6 +2159,14 @@ extern "C" __attribute__((noreturn)) void kernel_main(
     menu_selection = 0;
     install_zex_syscall_gate();
     initialize_mouse_cursor();
+    if (!load_desktop_wallpaper()) {
+        render_target = reinterpret_cast<uint32_t*>(backbuffer_address);
+        fill_rect(0, 0, static_cast<int>(screen_width),
+                  static_cast<int>(screen_height), 0x07172A);
+        draw_text("Nova OS: 无法读取桌面壁纸", 80, 80, 1, 0xFFFFFF);
+        present_backbuffer();
+        for (;;) __asm__ volatile("cli; hlt");
+    }
     draw_loading_screen();
     draw_desktop();
     initialize_mouse();
