@@ -2108,10 +2108,21 @@ static void move_mouse(int delta_x, int delta_y) {
     if (mouse_y > max_y) mouse_y = max_y;
 }
 
-static bool request_window_taskbar_action() {
+static bool request_window_app_switch() {
     if (!zex_runtime.running) return false;
 
     const int screen_bottom = static_cast<int>(screen_height);
+    if (mouse_x >= 38 && mouse_x < 190) {
+        for (uint32_t app = 0; app < 5; ++app) {
+            const int icon_top = 62 + static_cast<int>(app) * 156;
+            if (mouse_y >= icon_top && mouse_y < icon_top + 144) {
+                pending_zex_program = app;
+                pending_start_menu = false;
+                zex_runtime.close_requested = true;
+                return true;
+            }
+        }
+    }
     if (mouse_y >= screen_bottom - 62 && mouse_y < screen_bottom - 14 &&
         mouse_x >= 178 && mouse_x < 428 &&
         (mouse_x - 178) % 50 < 42) {
@@ -2172,7 +2183,7 @@ static void handle_mouse_packet() {
                 mouse_x < window_x + zex_runtime.window_width - 16 &&
                 mouse_y >= window_y + 10 && mouse_y < window_y + 34) {
                 zex_runtime.close_requested = true;
-            } else if (!request_window_taskbar_action() &&
+            } else if (!request_window_app_switch() &&
                        zex_runtime.file_manager) {
                 file_manager_select_mouse_row();
             }
