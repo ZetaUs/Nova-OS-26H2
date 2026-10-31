@@ -39,6 +39,9 @@ static uint8_t menu_selection;
 static uint32_t mouse_cursor_background[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT];
 static uint8_t mouse_cursor_coverage[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT];
 static uint8_t mouse_cursor_shade[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT];
+static uint32_t desktop_icon_source[
+    desktop_icon_source_size * desktop_icon_source_size
+];
 static const uintptr_t backbuffer_address = 0x01000000;
 // Preserve the clean desktop so overlays only need to redraw their own bounds.
 static const uintptr_t desktop_cache_address = 0x02000000;
@@ -56,6 +59,8 @@ static const uint32_t wallpaper_width = 1920;
 static const uint32_t wallpaper_height = 1080;
 static const uint32_t file_manager_visible_entries = 20;
 static const uint32_t file_manager_entry_limit = 128;
+static const uint32_t desktop_icon_source_size = 96;
+static const uint32_t desktop_icon_size = 120;
 
 struct ZexRegisterFrame {
     uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
@@ -184,6 +189,56 @@ static void initialize_mouse_cursor() {
             const int index = row * MOUSE_CURSOR_WIDTH + column;
             mouse_cursor_coverage[index] = mouse_cursor_alpha[index];
             mouse_cursor_shade[index] = mouse_cursor_luma[index];
+        }
+    }
+}
+
+static void draw_desktop_app_icon(int x, int y, uint8_t app) {
+    draw_desktop_app_icon_source(x, y, app);
+
+    const uint32_t row_stride = screen_pitch / 4;
+    for (uint32_t row = 0; row < desktop_icon_source_size; ++row) {
+        const uint32_t* source =
+            render_target + static_cast<uint32_t>(y + row) * row_stride + x;
+        uint32_t* destination =
+            desktop_icon_source + row * desktop_icon_source_size;
+        for (uint32_t column = 0; column < desktop_icon_source_size; ++column) {
+            destination[column] = source[column];
+        }
+    }
+
+    for (uint32_t row = 0; row < desktop_icon_size; ++row) {
+        const uint32_t source_y_fixed =
+            ((2 * row + 1) * desktop_icon_source_size * 32768 /
+             desktop_icon_size) - 32768;
+        const uint32_t source_y = source_y_fixed >> 16;
+        const uint32_t next_y = source_y < desktop_icon_source_size - 1
+            ? source_y + 1 : source_y;
+        const uint32_t fraction_y = source_y_fixed & 0xFFFF;
+        uint32_t* destination =
+            render_target + static_cast<uint32_t>(y + row) * row_stride + x;
+
+        for (uint32_t column = 0; column < desktop_icon_size; ++column) {
+            const uint32_t source_x_fixed =
+                ((2 * column + 1) * desktop_icon_source_size * 32768 /
+                 desktop_icon_size) - 32768;
+            const uint32_t source_x = source_x_fixed >> 16;
+            const uint32_t next_x = source_x < desktop_icon_source_size - 1
+                ? source_x + 1 : source_x;
+            const uint32_t fraction_x = source_x_fixed & 0xFFFF;
+            const uint32_t top = mix_color(
+                desktop_icon_source[source_y * desktop_icon_source_size + source_x],
+                desktop_icon_source[source_y * desktop_icon_source_size + next_x],
+                fraction_x,
+                65536
+            );
+            const uint32_t bottom = mix_color(
+                desktop_icon_source[next_y * desktop_icon_source_size + source_x],
+                desktop_icon_source[next_y * desktop_icon_source_size + next_x],
+                fraction_x,
+                65536
+            );
+            destination[column] = mix_color(top, bottom, fraction_y, 65536);
         }
     }
 }
@@ -466,7 +521,7 @@ static void draw_app_icon(int x, int y, bool explorer) {
     }
 }
 
-static void draw_desktop_app_icon(int x, int y, uint8_t app) {
+static void draw_desktop_app_icon_source(int x, int y, uint8_t app) {
     if (app < 2) {
         draw_app_icon(x, y, app == 0);
         return;
@@ -717,15 +772,15 @@ static void draw_desktop() {
     draw_wallpaper();
 
     draw_desktop_app_icon(54, 62, 0);
-    draw_desktop_icon_label("文件管理器", 102, 166, 5);
+    draw_desktop_icon_label("文件管理器", 102, 190, 5);
     draw_desktop_app_icon(54, 218, 2);
-    draw_desktop_icon_label("记事本", 102, 322, 3);
+    draw_desktop_icon_label("记事本", 102, 346, 3);
     draw_desktop_app_icon(54, 374, 3);
-    draw_desktop_icon_label("浏览器", 102, 478, 3);
+    draw_desktop_icon_label("浏览器", 102, 502, 3);
     draw_desktop_app_icon(54, 530, 4);
-    draw_desktop_icon_label("设置", 102, 634, 2);
+    draw_desktop_icon_label("设置", 102, 658, 2);
     draw_desktop_app_icon(54, 686, 5);
-    draw_desktop_icon_label("终端", 102, 790, 2);
+    draw_desktop_icon_label("终端", 102, 814, 2);
 
     fill_rect(0, static_cast<int>(screen_height) - 76, static_cast<int>(screen_width), 76, 0xE8102033);
     fill_rect(0, static_cast<int>(screen_height) - 76, static_cast<int>(screen_width), 1, 0x31506C);
