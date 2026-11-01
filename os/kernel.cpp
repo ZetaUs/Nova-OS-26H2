@@ -177,6 +177,8 @@ static void run_zex_program(uint32_t program_index);
 static void render_zex_window();
 static void render_open_zex_windows();
 static void refresh_taskbar();
+static __attribute__((noreturn)) void restart_system();
+static __attribute__((noreturn)) void shutdown_system();
 
 static inline void copy_to_framebuffer(
     volatile uint32_t* destination,
