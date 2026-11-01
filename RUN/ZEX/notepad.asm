@@ -32,5 +32,5 @@ code_end:
 
 data_start:
 win_title_np db "记事本",0
-msg_np       db "[记事本] 编辑文本，保存为 .ztxt / .asm / .cfg",0
+msg_np       db "[记事本] 编辑文本，保存为 .txt / .asm / .cfg",0
 data_end:

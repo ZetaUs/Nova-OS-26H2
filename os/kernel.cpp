@@ -1986,7 +1986,7 @@ static void run_zex_file_manager() {
     file_manager_volumes[1].ata_drive = 1;
     mount_fat_volume(file_manager_volumes[0]);
     mount_fat_volume(file_manager_volumes[1]);
-    file_manager_volume_index = 0;
+    file_manager_volume_index = file_manager_volumes[1].mounted ? 1 : 0;
     file_manager_directory_cluster = 0;
     file_manager_parent_depth = 0;
     keyboard_extended = false;
