@@ -51,13 +51,8 @@ static const uintptr_t backbuffer_address = 0x01000000;
 // Preserve the clean desktop so overlays only need to redraw their own bounds.
 static const uintptr_t desktop_cache_address = 0x02000000;
 static const uintptr_t start_menu_cache_address = 0x02800000;
-static const uintptr_t zex_window_cache_address = 0x02940000;
 static const uint32_t start_menu_width = 570;
 static const uint32_t start_menu_height = 530;
-static const uint32_t zex_window_cache_width_limit = 600;
-static const uint32_t zex_window_cache_height_limit = 420;
-static const uint32_t zex_window_cache_slot_size =
-    zex_window_cache_width_limit * zex_window_cache_height_limit;
 static const uintptr_t wallpaper_address = 0x03000000;
 static const uint32_t wallpaper_lba = 136;
 static const uintptr_t zex_load_address = 0x00400000;
@@ -152,8 +147,8 @@ static uint8_t directory_sector_buffer[512];
 static bool start_menu_cache_ready;
 static ZexRuntime zex_window_states[5];
 static uint32_t active_zex_program;
+static uint32_t focused_zex_program;
 static uint32_t pending_zex_program = no_pending_zex_program;
-static uint32_t requested_focus_app = no_pending_zex_program;
 static uint32_t next_window_order;
 static bool pending_start_menu;
 static const ZexProgram zex_programs[] = {
@@ -174,9 +169,21 @@ extern "C" void zex_syscall_dispatch(ZexRegisterFrame* registers);
 
 static void run_zex_file_manager();
 static void run_zex_program(uint32_t program_index);
+static void file_manager_select_mouse_row();
+static void handle_file_manager_key(uint8_t scan_code, bool extended);
 static void render_zex_window();
 static void render_open_zex_windows();
 static void refresh_taskbar();
+static void select_zex_window(uint32_t program_index);
+static void close_zex_window(uint32_t program_index);
+static void cache_rect(
+    uintptr_t destination_address,
+    uint32_t destination_stride,
+    int x,
+    int y,
+    int width,
+    int height
+);
 static __attribute__((noreturn)) void restart_system();
 static __attribute__((noreturn)) void shutdown_system();
 
@@ -655,7 +662,7 @@ static void draw_taskbar() {
     for (uint8_t app = 0; app < 5; ++app) {
         if (!zex_window_states[app].window_open) continue;
         const int x = 178 + static_cast<int>(slot) * 50;
-        if (app == active_zex_program) {
+        if (app == focused_zex_program) {
             fill_rounded_rect_gradient(
                 x - 3, top + 7, 48, 54, 7, 0x28729D, 0x183D5B
             );
@@ -1099,6 +1106,82 @@ static void render_open_zex_windows() {
     if (start_menu_open) draw_start_menu();
     present_backbuffer();
     draw_mouse_cursor();
+}
+
+static void select_zex_window(uint32_t program_index) {
+    if (program_index >= 5 ||
+        !zex_window_states[program_index].window_open) return;
+    focused_zex_program = program_index;
+    zex_window_states[program_index].window_order = ++next_window_order;
+    if (program_index == active_zex_program) {
+        zex_runtime.window_order =
+            zex_window_states[program_index].window_order;
+        zex_window_states[program_index] = zex_runtime;
+    }
+    render_open_zex_windows();
+}
+
+static void close_zex_window(uint32_t program_index) {
+    if (program_index >= 5 ||
+        !zex_window_states[program_index].window_open) return;
+
+    zex_window_states[program_index].close_requested = true;
+    zex_window_states[program_index].window_open = false;
+    if (program_index == active_zex_program) {
+        zex_runtime.close_requested = true;
+        zex_runtime.window_open = false;
+    }
+
+    if (focused_zex_program == program_index) {
+        focused_zex_program = no_pending_zex_program;
+        uint32_t highest_order = 0;
+        for (uint32_t app = 0; app < 5; ++app) {
+            if (zex_window_states[app].window_open &&
+                zex_window_states[app].window_order >= highest_order) {
+                focused_zex_program = app;
+                highest_order = zex_window_states[app].window_order;
+            }
+        }
+    }
+    render_open_zex_windows();
+}
+
+static void dispatch_focused_file_manager_key(uint8_t scan_code, bool extended) {
+    const uint32_t program = focused_zex_program;
+    if (program >= 5 || !zex_window_states[program].window_open ||
+        !zex_window_states[program].file_manager) return;
+    if (program == active_zex_program) {
+        handle_file_manager_key(scan_code, extended);
+        return;
+    }
+
+    const ZexRuntime saved_runtime = zex_runtime;
+    const uint32_t saved_program = active_zex_program;
+    active_zex_program = program;
+    zex_runtime = zex_window_states[program];
+    handle_file_manager_key(scan_code, extended);
+    zex_window_states[program] = zex_runtime;
+    active_zex_program = saved_program;
+    zex_runtime = saved_runtime;
+}
+
+static void dispatch_focused_file_manager_click() {
+    const uint32_t program = focused_zex_program;
+    if (program >= 5 || !zex_window_states[program].window_open ||
+        !zex_window_states[program].file_manager) return;
+    if (program == active_zex_program) {
+        file_manager_select_mouse_row();
+        return;
+    }
+
+    const ZexRuntime saved_runtime = zex_runtime;
+    const uint32_t saved_program = active_zex_program;
+    active_zex_program = program;
+    zex_runtime = zex_window_states[program];
+    file_manager_select_mouse_row();
+    zex_window_states[program] = zex_runtime;
+    active_zex_program = saved_program;
+    zex_runtime = saved_runtime;
 }
 
 static uint8_t in8(uint16_t port) {
@@ -1577,8 +1660,8 @@ static bool load_zex_program(const ZexProgram& program, uint64_t& entry) {
     zex_runtime.data_end = static_cast<uint32_t>(
         zex_runtime.data_start + data_size
     );
-    for (uint32_t offset = header_size; offset + 1 < zex_runtime.code_end -
-         zex_load_address; ++offset) {
+    for (uint32_t offset = header_size;
+         offset + 1 < zex_runtime.code_end - load_address; ++offset) {
         if (image[offset] == 0x0F && image[offset + 1] == 0x05) {
             image[offset] = 0xCD;
             image[offset + 1] = 0x80;
@@ -1595,10 +1678,7 @@ static bool load_zex_program(const ZexProgram& program, uint64_t& entry) {
 static void launch_or_focus_app(uint32_t app) {
     if (app >= 5) return;
     if (zex_window_states[app].window_open) {
-        if (app != active_zex_program) {
-            requested_focus_app = app;
-            zex_runtime.close_requested = true;
-        }
+        select_zex_window(app);
         return;
     }
     run_zex_program(app);
@@ -1665,7 +1745,7 @@ static bool handle_running_app_key(uint8_t key, bool extended, bool released) {
     }
 
     if (extended == false && key == 0x3E && keyboard_alt_down) {
-        zex_runtime.close_requested = true;
+        close_zex_window(focused_zex_program);
         return true;
     }
     return false;
@@ -1700,8 +1780,8 @@ static void wait_for_zex_key() {
             const uint8_t key = data & 0x7F;
             const bool extended = keyboard_extended;
             keyboard_extended = false;
-            if (!handle_running_app_key(key, extended, released)) {
-                return;
+            if (!handle_running_app_key(key, extended, released) && !released) {
+                dispatch_focused_file_manager_key(key, extended);
             }
         }
     }
@@ -1852,7 +1932,7 @@ static void handle_file_manager_key(uint8_t scan_code, bool extended) {
 
     switch (scan_code) {
     case 0x01:
-        zex_runtime.close_requested = true;
+        close_zex_window(focused_zex_program);
         break;
     case 0x0E:
         file_manager_go_parent();
@@ -1943,7 +2023,7 @@ static void run_zex_file_manager() {
             keyboard_extended = false;
             if (!handle_running_app_key(scan_code, extended, released) &&
                 !released) {
-                handle_file_manager_key(scan_code, extended);
+                dispatch_focused_file_manager_key(scan_code, extended);
             }
         }
     }
@@ -1971,18 +2051,14 @@ static void show_zex_load_error() {
 static void run_zex_program(uint32_t program_index) {
     if (program_index >= sizeof(zex_programs) / sizeof(zex_programs[0])) return;
     if (zex_window_states[program_index].window_open) {
-        if (program_index != active_zex_program) {
-            requested_focus_app = program_index;
-            zex_runtime.close_requested = true;
-        }
+        select_zex_window(program_index);
         return;
     }
 
     const bool parent_running = zex_runtime.running;
     const uint32_t parent_program = active_zex_program;
-    const ZexRuntime parent_runtime = zex_runtime;
     if (parent_running) {
-        zex_window_states[parent_program] = parent_runtime;
+        zex_window_states[parent_program] = zex_runtime;
     }
     active_zex_program = program_index;
     zex_runtime = ZexRuntime();
@@ -2000,19 +2076,23 @@ static void run_zex_program(uint32_t program_index) {
     zex_runtime.close_requested = false;
     zex_window_states[program_index] = zex_runtime;
 
+    if (focused_zex_program == program_index) {
+        focused_zex_program = no_pending_zex_program;
+        uint32_t highest_order = 0;
+        for (uint32_t app = 0; app < 5; ++app) {
+            if (zex_window_states[app].window_open &&
+                zex_window_states[app].window_order >= highest_order) {
+                focused_zex_program = app;
+                highest_order = zex_window_states[app].window_order;
+            }
+        }
+    }
+
     if (parent_running) {
         active_zex_program = parent_program;
-        zex_runtime = parent_runtime;
-        if (requested_focus_app == parent_program) {
-            requested_focus_app = no_pending_zex_program;
-            zex_runtime.window_order = ++next_window_order;
-            zex_window_states[parent_program].window_order = zex_runtime.window_order;
-        } else if (requested_focus_app != no_pending_zex_program) {
-            zex_runtime.close_requested = true;
-        }
+        zex_runtime = zex_window_states[parent_program];
     } else {
         zex_runtime = ZexRuntime();
-        requested_focus_app = no_pending_zex_program;
     }
     refresh_taskbar();
 }
@@ -2024,6 +2104,7 @@ static void render_zex_window() {
     if (opening && zex_runtime.window_order == 0) {
         zex_runtime.window_order = ++next_window_order;
     }
+    if (opening) focused_zex_program = active_zex_program;
     zex_window_states[active_zex_program] = zex_runtime;
     if (opening) refresh_taskbar();
     else render_open_zex_windows();
@@ -2069,6 +2150,8 @@ extern "C" void zex_syscall_dispatch(ZexRegisterFrame* registers) {
         if (zex_runtime.window_height > static_cast<int>(screen_height) - 100) {
             zex_runtime.window_height = static_cast<int>(screen_height) - 100;
         }
+        position_zex_window();
+        zex_runtime.window_order = ++next_window_order;
         zex_runtime.window_open = true;
         render_zex_window();
         registers->rax = 0;
@@ -2299,10 +2382,7 @@ static bool request_window_app_switch() {
     const int screen_bottom = static_cast<int>(screen_height);
     const uint32_t taskbar_app = taskbar_app_at(mouse_x, mouse_y);
     if (taskbar_app != no_pending_zex_program) {
-        if (taskbar_app != active_zex_program) {
-            requested_focus_app = taskbar_app;
-            zex_runtime.close_requested = true;
-        }
+        select_zex_window(taskbar_app);
         return true;
     }
     if (mouse_x >= 38 && mouse_x < 190) {
@@ -2310,10 +2390,7 @@ static bool request_window_app_switch() {
             const int icon_top = 62 + static_cast<int>(app) * 156;
             if (mouse_y >= icon_top && mouse_y < icon_top + 144) {
                 if (zex_window_states[app].window_open) {
-                    if (app != active_zex_program) {
-                        requested_focus_app = app;
-                        zex_runtime.close_requested = true;
-                    }
+                    select_zex_window(app);
                 } else {
                     pending_zex_program = app;
                 }
@@ -2363,17 +2440,28 @@ static void handle_mouse_packet() {
     const uint8_t buttons = flags & 7;
     if ((buttons & 1) != 0 && (mouse_buttons & 1) == 0) {
         if (zex_runtime.window_open) {
-            const int window_x =
-                (static_cast<int>(screen_width) - zex_runtime.window_width) / 2;
-            const int window_y =
-                (static_cast<int>(screen_height) - zex_runtime.window_height) / 2;
-            if (mouse_x >= window_x + zex_runtime.window_width - 42 &&
-                mouse_x < window_x + zex_runtime.window_width - 16 &&
-                mouse_y >= window_y + 10 && mouse_y < window_y + 34) {
-                zex_runtime.close_requested = true;
-            } else if (!request_window_app_switch() &&
-                       zex_runtime.file_manager) {
-                file_manager_select_mouse_row();
+            bool consumed = handle_running_start_menu_click();
+            if (!consumed) consumed = request_window_app_switch();
+            if (!consumed) {
+                const uint32_t clicked_window = zex_window_at_mouse();
+                if (clicked_window != no_pending_zex_program) {
+                    if (clicked_window != focused_zex_program) {
+                        select_zex_window(clicked_window);
+                    } else {
+                        const ZexRuntime& window =
+                            zex_window_states[clicked_window];
+                        if (mouse_x >= window.window_x +
+                                window.window_width - 42 &&
+                            mouse_x < window.window_x +
+                                window.window_width - 16 &&
+                            mouse_y >= window.window_y + 10 &&
+                            mouse_y < window.window_y + 34) {
+                            close_zex_window(clicked_window);
+                        } else {
+                            dispatch_focused_file_manager_click();
+                        }
+                    }
+                }
             }
         } else {
             const int screen_bottom = static_cast<int>(screen_height);
@@ -2397,22 +2485,17 @@ static void handle_mouse_packet() {
                        mouse_y >= screen_bottom - 204 && mouse_y < screen_bottom - 152) {
                 shutdown_system();
             } else if (launch_from_start_menu) {
-                process_pending_desktop_action();
+                start_menu_open = false;
+                refresh_start_menu();
             } else if (!start_menu_open && mouse_x >= 38 && mouse_x < 190 &&
                        mouse_y >= 62 && mouse_y < 834) {
                 for (uint32_t app = 0; app < 5; ++app) {
                     const int icon_top = 62 + static_cast<int>(app) * 156;
                     if (mouse_y >= icon_top && mouse_y < icon_top + 144) {
-                        run_zex_program(app);
+                        pending_zex_program = app;
                         break;
                     }
                 }
-            } else if (!start_menu_open &&
-                       mouse_y >= screen_bottom - 62 &&
-                       mouse_y < screen_bottom - 14 &&
-                       mouse_x >= 178 && mouse_x < 428 &&
-                       (mouse_x - 178) % 50 < 42) {
-                run_zex_program(static_cast<uint32_t>((mouse_x - 178) / 50));
             } else if (mouse_x < 84 && mouse_y >= screen_bottom - 76) {
                 start_menu_open = !start_menu_open;
                 refresh_start_menu();
