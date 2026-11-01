@@ -17,6 +17,7 @@ static void handle_mouse_packet();
 
 #include <logo_data.h>
 #include <mouse_cursor_data.h>
+#include <file_icons.h>
 #include <zex_apps.h>
 #include "chinese_font.h"
 #include "../HZKX/asc48_map.h"
@@ -907,29 +908,38 @@ static void refresh_start_menu() {
 }
 
 static void draw_file_manager_item_icon(int x, int y, bool directory) {
-    if (directory) {
-        fill_rounded_rect_gradient(x + 4, y + 10, 88, 78, 10,
-                                   0xFFE185, 0xD59035);
-        fill_rounded_rect_gradient(x + 10, y + 3, 42, 18, 6,
-                                   0xFFE99C, 0xD9A04A);
-        fill_rounded_rect_gradient(x + 1, y + 20, 94, 72, 10,
-                                   0xFFD66A, 0xB97525);
-        fill_rounded_rect_gradient(x + 7, y + 25, 82, 57, 8,
-                                   0xFFE7A0, 0xD08A35);
-        return;
+    const uint8_t* runs = directory
+        ? file_manager_folder_icon_rle : file_manager_file_icon_rle;
+    const uint32_t run_length = directory
+        ? sizeof(file_manager_folder_icon_rle)
+        : sizeof(file_manager_file_icon_rle);
+    const uint32_t row_stride = screen_pitch / 4;
+    uint32_t run_offset = 0;
+    uint32_t run_remaining = 0;
+    uint8_t palette_index = 0;
+    for (uint32_t source_y = 0; source_y < FILE_MANAGER_ICON_HEIGHT; ++source_y) {
+        const int target_y = y + static_cast<int>(source_y);
+        for (uint32_t source_x = 0; source_x < FILE_MANAGER_ICON_WIDTH; ++source_x) {
+            if (run_remaining == 0) {
+                if (run_offset + 1 >= run_length) return;
+                run_remaining = runs[run_offset++];
+                palette_index = runs[run_offset++];
+            }
+            --run_remaining;
+            const uint32_t color = file_manager_icon_palette[palette_index];
+            const uint32_t alpha = color >> 24;
+            const int target_x = x + static_cast<int>(source_x);
+            if (alpha != 0 && target_x >= 0 &&
+                target_x < static_cast<int>(screen_width) &&
+                target_y >= 0 && target_y < static_cast<int>(screen_height)) {
+                uint32_t* row = render_target +
+                    static_cast<uint32_t>(target_y) * row_stride;
+                const uint32_t rgb = color & 0x00FFFFFF;
+                row[target_x] = alpha == 255
+                    ? rgb : mix_color(row[target_x], rgb, alpha, 255);
+            }
+        }
     }
-
-    fill_rounded_rect_gradient(x + 1, y, 94, 100, 14,
-                               0x111111, 0x000000);
-    fill_rounded_rect_gradient(x + 7, y + 6, 82, 88, 11,
-                               0xFFFFFF, 0xE9EEF4);
-    fill_rounded_rect_gradient(x + 22, y + 15, 54, 68, 10,
-                               0x000000, 0x090909);
-    fill_rounded_rect_gradient(x + 27, y + 20, 44, 58, 7,
-                               0xFFFFFF, 0xF5F7FA);
-    fill_rect(x + 37, y + 36, 26, 5, 0x101010);
-    fill_rect(x + 37, y + 48, 26, 5, 0x101010);
-    fill_rect(x + 37, y + 60, 19, 5, 0x101010);
 }
 
 static void draw_file_manager_item_name(const char* name, int x, int y) {

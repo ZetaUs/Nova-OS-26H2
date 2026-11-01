@@ -67,6 +67,10 @@ echo [6.5/9] Generating the mouse cursor sprite...
 python "%~dp0generate_mouse_cursor.py" "%ROOT%\image\mouse.png" "%OUT%\mouse_cursor_data.h"
 if errorlevel 1 exit /b 1
 
+echo [6.7/10] Embedding the file-manager images...
+python "%~dp0generate_file_icons.py" "%ROOT%\image\icons" "%OUT%\file_icons.h"
+if errorlevel 1 exit /b 1
+
 echo [6.8/10] Assembling the bundled ZEX applications...
 for %%A in (filemgr notepad browser settings terminal) do (
   "%NASM%" -f bin "%ROOT%\RUN\ZEX\%%A.asm" -o "%OUT%\%%A.zex"
