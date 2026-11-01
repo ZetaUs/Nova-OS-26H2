@@ -1587,6 +1587,85 @@ static bool load_zex_program(const ZexProgram& program, uint64_t& entry) {
     return true;
 }
 
+static void launch_or_focus_app(uint32_t app) {
+    if (app >= 5) return;
+    if (zex_window_states[app].window_open) {
+        if (app != active_zex_program) {
+            requested_focus_app = app;
+            zex_runtime.close_requested = true;
+        }
+        return;
+    }
+    run_zex_program(app);
+}
+
+static void process_running_app_action() {
+    if (pending_start_menu) {
+        pending_start_menu = false;
+        restore_mouse_cursor();
+        start_menu_open = !start_menu_open;
+        refresh_start_menu();
+        if (start_menu_open) draw_mouse_cursor();
+    }
+    if (pending_zex_program == no_pending_zex_program) return;
+
+    const uint32_t app = pending_zex_program;
+    pending_zex_program = no_pending_zex_program;
+    launch_or_focus_app(app);
+}
+
+static bool handle_running_app_key(uint8_t key, bool extended, bool released) {
+    if (!extended && key == 0x38) {
+        keyboard_alt_down = !released;
+        return true;
+    }
+    if (released) return true;
+
+    if (extended && (key == 0x5B || key == 0x5C)) {
+        restore_mouse_cursor();
+        start_menu_open = !start_menu_open;
+        refresh_start_menu();
+        if (start_menu_open) draw_mouse_cursor();
+        return true;
+    }
+
+    if (start_menu_open) {
+        if (!extended && key == 0x01) {
+            restore_mouse_cursor();
+            start_menu_open = false;
+            render_open_zex_windows();
+        } else if (extended && (key == 0x48 || key == 0x50)) {
+            if (key == 0x48) {
+                menu_selection = menu_selection == 0 ? 6 : menu_selection - 1;
+            } else {
+                menu_selection = menu_selection == 6 ? 0 : menu_selection + 1;
+            }
+            restore_mouse_cursor();
+            refresh_start_menu_actions();
+            draw_mouse_cursor();
+        } else if (!extended && key == 0x1C) {
+            if (menu_selection < 5) {
+                const uint32_t app = menu_selection;
+                restore_mouse_cursor();
+                start_menu_open = false;
+                render_open_zex_windows();
+                launch_or_focus_app(app);
+            } else if (menu_selection == 5) {
+                restart_system();
+            } else {
+                shutdown_system();
+            }
+        }
+        return true;
+    }
+
+    if (extended == false && key == 0x3E && keyboard_alt_down) {
+        zex_runtime.close_requested = true;
+        return true;
+    }
+    return false;
+}
+
 static void wait_for_zex_key() {
     while (!zex_runtime.close_requested) {
         const uint8_t status = in8(0x64);
@@ -1606,6 +1685,7 @@ static void wait_for_zex_key() {
                 if (mouse_packet_stage == 3) {
                     mouse_packet_stage = 0;
                     handle_mouse_packet();
+                    process_running_app_action();
                 }
             }
         } else if (data == 0xE0) {
@@ -1615,17 +1695,7 @@ static void wait_for_zex_key() {
             const uint8_t key = data & 0x7F;
             const bool extended = keyboard_extended;
             keyboard_extended = false;
-            if (!extended && key == 0x38) {
-                keyboard_alt_down = !released;
-            } else if (!released && !extended && key == 0x3E &&
-                       keyboard_alt_down) {
-                zex_runtime.close_requested = true;
-            } else if (!released && extended &&
-                       (key == 0x5B || key == 0x5C)) {
-                pending_start_menu = true;
-                pending_zex_program = no_pending_zex_program;
-                zex_runtime.close_requested = true;
-            } else if (!released && !extended && key != 0x38) {
+            if (!handle_running_app_key(key, extended, released)) {
                 return;
             }
         }
