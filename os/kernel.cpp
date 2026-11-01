@@ -1521,6 +1521,10 @@ static uint64_t read_zex_u64(const uint8_t* image, uint32_t offset) {
     return value;
 }
 
+static uintptr_t zex_program_address(uint32_t program) {
+    return zex_load_address + static_cast<uintptr_t>(program) * 0x40000;
+}
+
 static bool copy_zex_string(uint64_t address, char* destination, uint32_t capacity) {
     if (capacity == 0 || address < zex_runtime.data_start ||
         address >= zex_runtime.data_end) {
@@ -1542,6 +1546,7 @@ static bool copy_zex_string(uint64_t address, char* destination, uint32_t capaci
 
 static bool load_zex_program(const ZexProgram& program, uint64_t& entry) {
     const uint32_t header_size = 36;
+    const uintptr_t load_address = zex_program_address(active_zex_program);
     if (program.image == 0 || program.image_size < header_size) return false;
     if (read_zex_u16(program.image, 0) != 0x575A ||
         read_zex_u16(program.image, 2) != 2) {
@@ -1556,17 +1561,17 @@ static bool load_zex_program(const ZexProgram& program, uint64_t& entry) {
     const uint64_t total_size = image_size + bss_size;
     if (code_size == 0 || image_size != program.image_size ||
         total_size > 256 * 1024 ||
-        entry < zex_load_address + header_size ||
-        entry >= zex_load_address + header_size + code_size) {
+        entry < load_address + header_size ||
+        entry >= load_address + header_size + code_size) {
         return false;
     }
 
-    uint8_t* const image = reinterpret_cast<uint8_t*>(zex_load_address);
+    uint8_t* const image = reinterpret_cast<uint8_t*>(load_address);
     for (uint32_t offset = 0; offset < program.image_size; ++offset) {
         image[offset] = program.image[offset];
     }
     zex_runtime.code_end = static_cast<uint32_t>(
-        zex_load_address + header_size + code_size
+        load_address + header_size + code_size
     );
     zex_runtime.data_start = zex_runtime.code_end;
     zex_runtime.data_end = static_cast<uint32_t>(
