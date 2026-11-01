@@ -1928,9 +1928,6 @@ static void file_manager_select_mouse_row() {
     if (mouse_y >= window_y + 76 && mouse_y < window_y + 114) {
         if (mouse_x >= window_x + 30 && mouse_x < window_x + 142) {
             switch_file_manager_volume(0);
-        } else if (mouse_x >= window_x + 30 && mouse_x < window_x + 142 &&
-                   mouse_y >= window_y + 122 && mouse_y < window_y + 160) {
-            switch_file_manager_volume(1);
         }
         return;
     }
@@ -1952,7 +1949,7 @@ static void file_manager_select_mouse_row() {
         return;
     }
 
-    const int grid_left = window_x + 185;
+    const int grid_left = window_x + 181;
     const int grid_top = window_y + 112;
     if (mouse_x < grid_left || mouse_y < grid_top) return;
     const uint32_t column = static_cast<uint32_t>(mouse_x - grid_left) / 132;
