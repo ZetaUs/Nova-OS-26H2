@@ -934,6 +934,9 @@ static void draw_file_manager_item_icon(int x, int y, bool directory) {
 
 static void draw_file_manager_item_name(const char* name, int x, int y) {
     char label[64];
+    uint8_t glyph_bytes[64];
+    uint8_t glyph_widths[64];
+    uint32_t glyph_count = 0;
     uint32_t source = 0;
     uint32_t output = 0;
     uint32_t width = 0;
@@ -947,10 +950,14 @@ static void draw_file_manager_item_name(const char* name, int x, int y) {
         uint32_t glyph_width = lead < 0x80
             ? (lead == ' ' ? 7 : 13) : 24;
         if (width + glyph_width > 104 ||
-            output + byte_count >= sizeof(label)) {
+            output + byte_count >= sizeof(label) ||
+            glyph_count >= sizeof(glyph_bytes)) {
             truncated = true;
             break;
         }
+        glyph_bytes[glyph_count] = static_cast<uint8_t>(byte_count);
+        glyph_widths[glyph_count] = static_cast<uint8_t>(glyph_width);
+        ++glyph_count;
         for (uint32_t byte = 0; byte < byte_count && name[source + byte] != '\0';
              ++byte) {
             label[output++] = name[source + byte];
@@ -959,7 +966,12 @@ static void draw_file_manager_item_name(const char* name, int x, int y) {
         width += glyph_width;
     }
     if (name[source] != '\0') truncated = true;
-    if (truncated && width <= 80 && output + 3 < sizeof(label)) {
+    if (truncated && output + 3 < sizeof(label)) {
+        while (width > 80 && glyph_count != 0) {
+            --glyph_count;
+            output -= glyph_bytes[glyph_count];
+            width -= glyph_widths[glyph_count];
+        }
         label[output++] = '.';
         label[output++] = '.';
         label[output++] = '.';
