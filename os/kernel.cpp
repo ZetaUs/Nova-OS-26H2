@@ -97,6 +97,9 @@ struct ZexRuntime {
     uint32_t data_end;
     int window_width;
     int window_height;
+    int window_x;
+    int window_y;
+    uint32_t window_order;
     char title[64];
     char message[128];
 };
@@ -147,13 +150,11 @@ static uint8_t ata_sector_buffer[512];
 static uint8_t fat_sector_buffer[512];
 static uint8_t directory_sector_buffer[512];
 static bool start_menu_cache_ready;
-static bool zex_window_cache_valid[5];
-static uint32_t zex_window_cache_width[5];
-static uint32_t zex_window_cache_height[5];
-static char zex_window_cache_title[5][sizeof(zex_runtime.title)];
-static char zex_window_cache_message[5][sizeof(zex_runtime.message)];
+static ZexRuntime zex_window_states[5];
 static uint32_t active_zex_program;
 static uint32_t pending_zex_program = no_pending_zex_program;
+static uint32_t requested_focus_app = no_pending_zex_program;
+static uint32_t next_window_order;
 static bool pending_start_menu;
 static const ZexProgram zex_programs[] = {
     { zex_filemgr, zex_filemgr_size },
@@ -172,7 +173,10 @@ extern "C" void zex_call_entry(uint64_t entry);
 extern "C" void zex_syscall_dispatch(ZexRegisterFrame* registers);
 
 static void run_zex_file_manager();
+static void run_zex_program(uint32_t program_index);
 static void render_zex_window();
+static void render_open_zex_windows();
+static void refresh_taskbar();
 
 static inline void copy_to_framebuffer(
     volatile uint32_t* destination,
@@ -636,6 +640,63 @@ static void draw_nova_mark(int x, int y) {
     draw_triangle(x + 15, y + 10, x + 23, y + 34, x + 29, y + 34, color);
 }
 
+static void draw_taskbar() {
+    const int top = static_cast<int>(screen_height) - 76;
+    fill_rect(0, top, static_cast<int>(screen_width), 76, 0xE8102033);
+    fill_rect(0, top, static_cast<int>(screen_width), 1, 0x31506C);
+    fill_rect(22, top + 12, 52, 52, start_menu_open ? 0x15527A : 0x102B45);
+    draw_nova_mark(26, top + 16);
+    fill_rect(92, top + 18, 1, 40, 0x38516A);
+    draw_text("Nova", 116, top + 26, 1, 0xFFFFFF);
+
+    uint32_t slot = 0;
+    for (uint8_t app = 0; app < 5; ++app) {
+        if (!zex_window_states[app].window_open) continue;
+        const int x = 178 + static_cast<int>(slot) * 50;
+        if (app == active_zex_program) {
+            fill_rounded_rect_gradient(
+                x - 3, top + 7, 48, 54, 7, 0x28729D, 0x183D5B
+            );
+        }
+        draw_taskbar_app_icon(x, top + 14, app);
+        ++slot;
+    }
+
+    draw_text("64位", static_cast<int>(screen_width) - 220, top + 26, 1, 0xA8C4DB);
+    fill_rect(static_cast<int>(screen_width) - 120, top + 24, 1, 30, 0x38516A);
+    draw_text("26H2版", static_cast<int>(screen_width) - 130, top + 26, 1, 0x75D8FF);
+}
+
+static uint32_t taskbar_app_at(int x, int y) {
+    const int top = static_cast<int>(screen_height) - 76;
+    if (y < top + 14 || y >= top + 62) return no_pending_zex_program;
+
+    uint32_t slot = 0;
+    for (uint32_t app = 0; app < 5; ++app) {
+        if (!zex_window_states[app].window_open) continue;
+        const int left = 178 + static_cast<int>(slot) * 50;
+        if (x >= left && x < left + 42) return app;
+        ++slot;
+    }
+    return no_pending_zex_program;
+}
+
+static void refresh_taskbar() {
+    render_target = reinterpret_cast<uint32_t*>(backbuffer_address);
+    draw_taskbar();
+    const int top = static_cast<int>(screen_height) - 76;
+    cache_rect(
+        desktop_cache_address +
+            static_cast<uintptr_t>(top) * screen_width * sizeof(uint32_t),
+        screen_width,
+        0,
+        top,
+        static_cast<int>(screen_width),
+        76
+    );
+    render_open_zex_windows();
+}
+
 static void draw_wallpaper() {
     const uint16_t* wallpaper =
         reinterpret_cast<const uint16_t*>(wallpaper_address);
@@ -830,8 +891,7 @@ static void refresh_start_menu() {
         return;
     }
 
-    restore_desktop_rect(24, top, 570, 530);
-    present_rect(24, top, 570, 530);
+    render_open_zex_windows();
 }
 
 static void draw_desktop() {
@@ -849,22 +909,7 @@ static void draw_desktop() {
     draw_desktop_app_icon(54, 686, 5);
     draw_desktop_icon_label("终端", 102, 814, 2);
 
-    fill_rect(0, static_cast<int>(screen_height) - 76, static_cast<int>(screen_width), 76, 0xE8102033);
-    fill_rect(0, static_cast<int>(screen_height) - 76, static_cast<int>(screen_width), 1, 0x31506C);
-    fill_rect(22, static_cast<int>(screen_height) - 64, 52, 52, start_menu_open ? 0x15527A : 0x102B45);
-    draw_nova_mark(26, static_cast<int>(screen_height) - 60);
-    fill_rect(92, static_cast<int>(screen_height) - 58, 1, 40, 0x38516A);
-    draw_text("Nova", 116, static_cast<int>(screen_height) - 50, 1, 0xFFFFFF);
-    for (uint8_t app = 0; app < 5; ++app) {
-        draw_taskbar_app_icon(
-            178 + static_cast<int>(app) * 50,
-            static_cast<int>(screen_height) - 62,
-            app
-        );
-    }
-    draw_text("64位", static_cast<int>(screen_width) - 220, static_cast<int>(screen_height) - 50, 1, 0xA8C4DB);
-    fill_rect(static_cast<int>(screen_width) - 120, static_cast<int>(screen_height) - 52, 1, 30, 0x38516A);
-    draw_text("26H2版", static_cast<int>(screen_width) - 130, static_cast<int>(screen_height) - 50, 1, 0x75D8FF);
+    draw_taskbar();
 
     const uint32_t row_stride = screen_pitch / 4;
     const uint32_t* source = render_target;
@@ -906,8 +951,8 @@ static void draw_desktop() {
 static void draw_zex_window() {
     if (!zex_runtime.window_open) return;
 
-    const int x = (static_cast<int>(screen_width) - zex_runtime.window_width) / 2;
-    const int y = (static_cast<int>(screen_height) - zex_runtime.window_height) / 2;
+    const int x = zex_runtime.window_x;
+    const int y = zex_runtime.window_y;
     fill_rounded_rect_gradient(
         x, y, zex_runtime.window_width, zex_runtime.window_height, 12,
         0x123451, 0x09192A
@@ -1011,7 +1056,6 @@ static void draw_zex_window() {
         draw_text("点击右上角按钮或按 Alt+F4 关闭", x + 24,
                   y + zex_runtime.window_height - 42, 1, 0x9BB1C8);
     }
-    present_rect(x, y, zex_runtime.window_width, zex_runtime.window_height);
 }
 
 static uint8_t in8(uint16_t port) {
