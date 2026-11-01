@@ -1058,6 +1058,47 @@ static void draw_zex_window() {
     }
 }
 
+static void render_open_zex_windows() {
+    if (mouse_cursor_drawn) restore_mouse_cursor();
+    render_target = reinterpret_cast<uint32_t*>(backbuffer_address);
+    copy_cached_rect(
+        desktop_cache_address,
+        screen_width,
+        0,
+        0,
+        static_cast<int>(screen_width),
+        static_cast<int>(screen_height)
+    );
+
+    const ZexRuntime saved_runtime = zex_runtime;
+    const uint32_t saved_program = active_zex_program;
+    uint32_t order[5];
+    uint32_t count = 0;
+    for (uint32_t app = 0; app < 5; ++app) {
+        if (!zex_window_states[app].window_open) continue;
+        uint32_t position = count;
+        while (position != 0 &&
+               zex_window_states[order[position - 1]].window_order >
+                   zex_window_states[app].window_order) {
+            order[position] = order[position - 1];
+            --position;
+        }
+        order[position] = app;
+        ++count;
+    }
+
+    for (uint32_t index = 0; index < count; ++index) {
+        active_zex_program = order[index];
+        zex_runtime = zex_window_states[active_zex_program];
+        draw_zex_window();
+    }
+    active_zex_program = saved_program;
+    zex_runtime = saved_runtime;
+    if (start_menu_open) draw_start_menu();
+    present_backbuffer();
+    draw_mouse_cursor();
+}
+
 static uint8_t in8(uint16_t port) {
     uint8_t value;
     __asm__ volatile("inb %1, %0" : "=a"(value) : "Nd"(port));
