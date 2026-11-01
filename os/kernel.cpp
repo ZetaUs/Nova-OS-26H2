@@ -1118,7 +1118,7 @@ static void select_zex_window(uint32_t program_index) {
             zex_window_states[program_index].window_order;
         zex_window_states[program_index] = zex_runtime;
     }
-    render_open_zex_windows();
+    refresh_taskbar();
 }
 
 static void close_zex_window(uint32_t program_index) {
@@ -1143,7 +1143,7 @@ static void close_zex_window(uint32_t program_index) {
             }
         }
     }
-    render_open_zex_windows();
+    refresh_taskbar();
 }
 
 static void dispatch_focused_file_manager_key(uint8_t scan_code, bool extended) {
@@ -1782,6 +1782,7 @@ static void wait_for_zex_key() {
             keyboard_extended = false;
             if (!handle_running_app_key(key, extended, released) && !released) {
                 dispatch_focused_file_manager_key(key, extended);
+                if (focused_zex_program == active_zex_program) return;
             }
         }
     }
@@ -2485,8 +2486,7 @@ static void handle_mouse_packet() {
                        mouse_y >= screen_bottom - 204 && mouse_y < screen_bottom - 152) {
                 shutdown_system();
             } else if (launch_from_start_menu) {
-                start_menu_open = false;
-                refresh_start_menu();
+                process_pending_desktop_action();
             } else if (!start_menu_open && mouse_x >= 38 && mouse_x < 190 &&
                        mouse_y >= 62 && mouse_y < 834) {
                 for (uint32_t app = 0; app < 5; ++app) {
