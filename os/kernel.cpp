@@ -932,6 +932,42 @@ static void draw_file_manager_item_icon(int x, int y, bool directory) {
     fill_rect(x + 37, y + 60, 19, 5, 0x101010);
 }
 
+static void draw_file_manager_item_name(const char* name, int x, int y) {
+    char label[64];
+    uint32_t source = 0;
+    uint32_t output = 0;
+    uint32_t width = 0;
+    bool truncated = false;
+    while (name[source] != '\0') {
+        const uint8_t lead = static_cast<uint8_t>(name[source]);
+        const uint32_t byte_count = lead < 0x80 ? 1 :
+            ((lead & 0xE0) == 0xC0 ? 2 :
+             ((lead & 0xF0) == 0xE0 ? 3 :
+              ((lead & 0xF8) == 0xF0 ? 4 : 1)));
+        uint32_t glyph_width = lead < 0x80
+            ? (lead == ' ' ? 7 : 13) : 24;
+        if (width + glyph_width > 104 ||
+            output + byte_count >= sizeof(label)) {
+            truncated = true;
+            break;
+        }
+        for (uint32_t byte = 0; byte < byte_count && name[source + byte] != '\0';
+             ++byte) {
+            label[output++] = name[source + byte];
+        }
+        source += byte_count;
+        width += glyph_width;
+    }
+    if (name[source] != '\0') truncated = true;
+    if (truncated && width <= 80 && output + 3 < sizeof(label)) {
+        label[output++] = '.';
+        label[output++] = '.';
+        label[output++] = '.';
+    }
+    label[output] = '\0';
+    draw_text(label, x, y, 1, 0xFFFFFF);
+}
+
 static void draw_file_manager() {
     const int x = zex_runtime.window_x;
     const int y = zex_runtime.window_y;
@@ -1002,8 +1038,8 @@ static void draw_file_manager() {
             }
             draw_file_manager_item_icon(tile_x + 10, tile_y + 2,
                                         file_manager_entries[index].directory);
-            draw_text(file_manager_entries[index].name, tile_x + 5,
-                      tile_y + 108, 1, 0xFFFFFF);
+            draw_file_manager_item_name(file_manager_entries[index].name,
+                                        tile_x + 5, tile_y + 108);
             ++visible_count;
         }
     }
