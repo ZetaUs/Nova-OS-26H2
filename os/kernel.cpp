@@ -1710,10 +1710,8 @@ static void file_manager_open_selected() {
 }
 
 static void file_manager_select_mouse_row() {
-    const int window_x =
-        (static_cast<int>(screen_width) - zex_runtime.window_width) / 2;
-    const int window_y =
-        (static_cast<int>(screen_height) - zex_runtime.window_height) / 2;
+    const int window_x = zex_runtime.window_x;
+    const int window_y = zex_runtime.window_y;
     if (mouse_y >= window_y + 106 && mouse_y < window_y + 138) {
         if (mouse_x >= window_x + 38 && mouse_x < window_x + 178) {
             switch_file_manager_volume(0);
