@@ -1,5 +1,5 @@
 [bits 64]
-[org 0x400000]
+org 0x480000
 BSS_SIZE  equ 1024
 
 zex_header:

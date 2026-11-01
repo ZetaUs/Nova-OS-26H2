@@ -3,13 +3,19 @@ import sys
 from pathlib import Path
 
 
-PROGRAMS = ("filemgr", "notepad", "browser", "settings", "terminal")
+PROGRAMS = (
+    ("filemgr", 0x400000),
+    ("notepad", 0x440000),
+    ("browser", 0x480000),
+    ("settings", 0x4C0000),
+    ("terminal", 0x500000),
+)
 HEADER_FORMAT = "<HHQQQQ"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 MAX_IMAGE_SIZE = 256 * 1024
 
 
-def read_program(path):
+def read_program(path, load_address):
     data = path.read_bytes()
     if len(data) < HEADER_SIZE or len(data) > MAX_IMAGE_SIZE:
         raise ValueError(f"{path.name} has an invalid ZEX image size.")
@@ -23,7 +29,7 @@ def read_program(path):
         raise ValueError(f"{path.name} section sizes do not match the image.")
     if code_size == 0 or bss_size > MAX_IMAGE_SIZE:
         raise ValueError(f"{path.name} has invalid code or BSS size.")
-    if entry < 0x400000 + HEADER_SIZE or entry >= 0x400000 + HEADER_SIZE + code_size:
+    if entry < load_address + HEADER_SIZE or entry >= load_address + HEADER_SIZE + code_size:
         raise ValueError(f"{path.name} entry point is outside its code section.")
     if HEADER_SIZE + code_size + data_size + bss_size > MAX_IMAGE_SIZE:
         raise ValueError(f"{path.name} exceeds the ZEX load limit.")
@@ -48,8 +54,13 @@ def main():
 
     source_dir, output_path = map(Path, sys.argv[1:])
     lines = []
-    for name in PROGRAMS:
-        lines.extend(format_array(name, read_program(source_dir / f"{name}.zex")))
+    for name, load_address in PROGRAMS:
+        lines.extend(
+            format_array(
+                name,
+                read_program(source_dir / f"{name}.zex", load_address),
+            )
+        )
         lines.append("")
     Path(output_path).write_text("\n".join(lines), encoding="ascii")
     print(f"Embedded {len(PROGRAMS)} validated ZEX applications.")

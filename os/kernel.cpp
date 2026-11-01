@@ -1870,12 +1870,36 @@ static void handle_file_manager_key(uint8_t scan_code, bool extended) {
     }
 }
 
+static void position_zex_window() {
+    uint32_t open_count = 0;
+    for (uint32_t app = 0; app < 5; ++app) {
+        if (zex_window_states[app].window_open) ++open_count;
+    }
+
+    zex_runtime.window_x =
+        (static_cast<int>(screen_width) - zex_runtime.window_width) / 2 +
+        static_cast<int>(open_count) * 42;
+    zex_runtime.window_y =
+        (static_cast<int>(screen_height) - zex_runtime.window_height) / 2 +
+        static_cast<int>(open_count) * 34;
+    if (zex_runtime.window_x < 20) zex_runtime.window_x = 20;
+    if (zex_runtime.window_y < 20) zex_runtime.window_y = 20;
+    const int max_x = static_cast<int>(screen_width) -
+        zex_runtime.window_width - 20;
+    const int max_y = static_cast<int>(screen_height) -
+        zex_runtime.window_height - 90;
+    if (zex_runtime.window_x > max_x) zex_runtime.window_x = max_x;
+    if (zex_runtime.window_y > max_y) zex_runtime.window_y = max_y;
+}
+
 static void run_zex_file_manager() {
     zex_runtime.file_manager = true;
     zex_runtime.window_open = true;
     zex_runtime.close_requested = false;
     zex_runtime.window_width = 1120;
     zex_runtime.window_height = 760;
+    position_zex_window();
+    zex_runtime.window_order = ++next_window_order;
     copy_zex_literal(zex_runtime.title, sizeof(zex_runtime.title), "文件管理器");
     file_manager_volumes[0].ata_drive = 2;
     file_manager_volumes[1].ata_drive = 1;
@@ -1907,6 +1931,7 @@ static void run_zex_file_manager() {
                 if (mouse_packet_stage == 3) {
                     mouse_packet_stage = 0;
                     handle_mouse_packet();
+                    process_running_app_action();
                 }
             }
         } else if (data == 0xE0) {
@@ -1916,17 +1941,8 @@ static void run_zex_file_manager() {
             const uint8_t scan_code = data & 0x7F;
             const bool extended = keyboard_extended;
             keyboard_extended = false;
-            if (!extended && scan_code == 0x38) {
-                keyboard_alt_down = !released;
-            } else if (!released && !extended && scan_code == 0x3E &&
-                       keyboard_alt_down) {
-                zex_runtime.close_requested = true;
-            } else if (!released && extended &&
-                       (scan_code == 0x5B || scan_code == 0x5C)) {
-                pending_start_menu = true;
-                pending_zex_program = no_pending_zex_program;
-                zex_runtime.close_requested = true;
-            } else if (!released) {
+            if (!handle_running_app_key(scan_code, extended, released) &&
+                !released) {
                 handle_file_manager_key(scan_code, extended);
             }
         }
@@ -1942,113 +1958,75 @@ static void show_zex_load_error() {
     zex_runtime.close_requested = false;
     zex_runtime.window_width = 520;
     zex_runtime.window_height = 240;
+    position_zex_window();
+    zex_runtime.window_order = ++next_window_order;
     copy_zex_literal(zex_runtime.title, sizeof(zex_runtime.title), "程序加载失败");
     copy_zex_literal(zex_runtime.message, sizeof(zex_runtime.message), "ZEX程序数据无效");
     render_zex_window();
     wait_for_zex_key();
     zex_runtime.window_open = false;
-    const int x = (static_cast<int>(screen_width) - zex_runtime.window_width) / 2;
-    const int y = (static_cast<int>(screen_height) - zex_runtime.window_height) / 2;
-    restore_desktop_rect(x, y, zex_runtime.window_width, zex_runtime.window_height);
-    present_rect(x, y, zex_runtime.window_width, zex_runtime.window_height);
-    draw_mouse_cursor();
+    render_open_zex_windows();
 }
 
 static void run_zex_program(uint32_t program_index) {
     if (program_index >= sizeof(zex_programs) / sizeof(zex_programs[0])) return;
-
-    active_zex_program = program_index;
-    uint64_t entry = 0;
-    if (!load_zex_program(zex_programs[program_index], entry)) {
-        show_zex_load_error();
+    if (zex_window_states[program_index].window_open) {
+        if (program_index != active_zex_program) {
+            requested_focus_app = program_index;
+            zex_runtime.close_requested = true;
+        }
         return;
     }
 
+    const bool parent_running = zex_runtime.running;
+    const uint32_t parent_program = active_zex_program;
+    const ZexRuntime parent_runtime = zex_runtime;
+    if (parent_running) {
+        zex_window_states[parent_program] = parent_runtime;
+    }
+    active_zex_program = program_index;
+    zex_runtime = ZexRuntime();
     zex_runtime.running = true;
-    zex_runtime.window_open = false;
-    zex_runtime.close_requested = false;
     keyboard_alt_down = false;
-    zex_runtime.title[0] = '\0';
-    zex_runtime.message[0] = '\0';
-    mouse_cursor_drawn = false;
-    zex_call_entry(entry);
+    uint64_t entry = 0;
+    if (!load_zex_program(zex_programs[program_index], entry)) {
+        show_zex_load_error();
+    } else {
+        mouse_cursor_drawn = false;
+        zex_call_entry(entry);
+    }
     zex_runtime.running = false;
     zex_runtime.window_open = false;
     zex_runtime.close_requested = false;
-    restore_mouse_cursor();
-    const int x = (static_cast<int>(screen_width) - zex_runtime.window_width) / 2;
-    const int y = (static_cast<int>(screen_height) - zex_runtime.window_height) / 2;
-    restore_desktop_rect(x, y, zex_runtime.window_width, zex_runtime.window_height);
-    present_rect(x, y, zex_runtime.window_width, zex_runtime.window_height);
-    draw_mouse_cursor();
+    zex_window_states[program_index] = zex_runtime;
+
+    if (parent_running) {
+        active_zex_program = parent_program;
+        zex_runtime = parent_runtime;
+        if (requested_focus_app == parent_program) {
+            requested_focus_app = no_pending_zex_program;
+            zex_runtime.window_order = ++next_window_order;
+            zex_window_states[parent_program].window_order = zex_runtime.window_order;
+        } else if (requested_focus_app != no_pending_zex_program) {
+            zex_runtime.close_requested = true;
+        }
+    } else {
+        zex_runtime = ZexRuntime();
+        requested_focus_app = no_pending_zex_program;
+    }
+    refresh_taskbar();
 }
 
 static void render_zex_window() {
-    if (mouse_cursor_drawn) restore_mouse_cursor();
-    if (!zex_runtime.window_open) return;
-    const int x = (static_cast<int>(screen_width) - zex_runtime.window_width) / 2;
-    const int y = (static_cast<int>(screen_height) - zex_runtime.window_height) / 2;
-    restore_desktop_rect(x, y, zex_runtime.window_width, zex_runtime.window_height);
-
-    const uint32_t program = active_zex_program;
-    const bool cacheable = !zex_runtime.file_manager &&
-        program < sizeof(zex_window_cache_valid) / sizeof(zex_window_cache_valid[0]) &&
-        zex_runtime.window_width <= static_cast<int>(zex_window_cache_width_limit) &&
-        zex_runtime.window_height <= static_cast<int>(zex_window_cache_height_limit);
-    bool cache_matches = cacheable && zex_window_cache_valid[program] &&
-        zex_window_cache_width[program] == static_cast<uint32_t>(zex_runtime.window_width) &&
-        zex_window_cache_height[program] == static_cast<uint32_t>(zex_runtime.window_height);
-    for (uint32_t index = 0; cache_matches && index < sizeof(zex_runtime.title); ++index) {
-        if (zex_window_cache_title[program][index] != zex_runtime.title[index]) {
-            cache_matches = false;
-        }
+    const bool opening =
+        zex_runtime.window_open &&
+        !zex_window_states[active_zex_program].window_open;
+    if (opening && zex_runtime.window_order == 0) {
+        zex_runtime.window_order = ++next_window_order;
     }
-    for (uint32_t index = 0; cache_matches && index < sizeof(zex_runtime.message); ++index) {
-        if (zex_window_cache_message[program][index] != zex_runtime.message[index]) {
-            cache_matches = false;
-        }
-    }
-    const uintptr_t cache_address = zex_window_cache_address +
-        static_cast<uintptr_t>(program) * zex_window_cache_slot_size * sizeof(uint32_t);
-    if (cache_matches) {
-        copy_cached_rect(
-            cache_address,
-            zex_window_cache_width_limit,
-            x,
-            y,
-            zex_runtime.window_width,
-            zex_runtime.window_height
-        );
-        present_rect(x, y, zex_runtime.window_width, zex_runtime.window_height);
-    } else {
-        draw_zex_window();
-        if (cacheable) {
-            cache_rect(
-                cache_address,
-                zex_window_cache_width_limit,
-                x,
-                y,
-                zex_runtime.window_width,
-                zex_runtime.window_height
-            );
-            zex_window_cache_width[program] =
-                static_cast<uint32_t>(zex_runtime.window_width);
-            zex_window_cache_height[program] =
-                static_cast<uint32_t>(zex_runtime.window_height);
-            copy_zex_literal(
-                zex_window_cache_title[program],
-                sizeof(zex_window_cache_title[program]),
-                zex_runtime.title
-            );
-            copy_zex_literal(
-                zex_window_cache_message[program],
-                sizeof(zex_window_cache_message[program]),
-                zex_runtime.message
-            );
-            zex_window_cache_valid[program] = true;
-        }
-    }
-    draw_mouse_cursor();
+    zex_window_states[active_zex_program] = zex_runtime;
+    if (opening) refresh_taskbar();
+    else render_open_zex_windows();
 }
 
 extern "C" void zex_syscall_dispatch(ZexRegisterFrame* registers) {
@@ -2268,34 +2246,84 @@ static void move_mouse(int delta_x, int delta_y) {
     if (mouse_y > max_y) mouse_y = max_y;
 }
 
+static uint32_t zex_window_at_mouse() {
+    uint32_t selected = no_pending_zex_program;
+    uint32_t highest_order = 0;
+    for (uint32_t app = 0; app < 5; ++app) {
+        const ZexRuntime& window = zex_window_states[app];
+        if (!window.window_open || window.window_order < highest_order) continue;
+        if (mouse_x >= window.window_x &&
+            mouse_x < window.window_x + window.window_width &&
+            mouse_y >= window.window_y &&
+            mouse_y < window.window_y + window.window_height) {
+            selected = app;
+            highest_order = window.window_order;
+        }
+    }
+    return selected;
+}
+
+static bool handle_running_start_menu_click() {
+    if (!start_menu_open) return false;
+    const int bottom = static_cast<int>(screen_height);
+    if (mouse_x >= 52 && mouse_x < 562) {
+        for (uint8_t app = 0; app < 5; ++app) {
+            const int row_y = bottom - 536 + static_cast<int>(app) * 46;
+            if (mouse_y >= row_y && mouse_y < row_y + 44) {
+                pending_zex_program = app;
+                start_menu_open = false;
+                render_open_zex_windows();
+                return true;
+            }
+        }
+        if (mouse_y >= bottom - 264 && mouse_y < bottom - 212) {
+            restart_system();
+        }
+        if (mouse_y >= bottom - 204 && mouse_y < bottom - 152) {
+            shutdown_system();
+        }
+    }
+
+    if (mouse_x < 24 || mouse_x >= 594 ||
+        mouse_y < bottom - 618 || mouse_y >= bottom - 88) {
+        start_menu_open = false;
+        render_open_zex_windows();
+        return false;
+    }
+    return true;
+}
+
 static bool request_window_app_switch() {
     if (!zex_runtime.running) return false;
 
     const int screen_bottom = static_cast<int>(screen_height);
+    const uint32_t taskbar_app = taskbar_app_at(mouse_x, mouse_y);
+    if (taskbar_app != no_pending_zex_program) {
+        if (taskbar_app != active_zex_program) {
+            requested_focus_app = taskbar_app;
+            zex_runtime.close_requested = true;
+        }
+        return true;
+    }
     if (mouse_x >= 38 && mouse_x < 190) {
         for (uint32_t app = 0; app < 5; ++app) {
             const int icon_top = 62 + static_cast<int>(app) * 156;
             if (mouse_y >= icon_top && mouse_y < icon_top + 144) {
-                pending_zex_program = app;
-                pending_start_menu = false;
-                zex_runtime.close_requested = true;
+                if (zex_window_states[app].window_open) {
+                    if (app != active_zex_program) {
+                        requested_focus_app = app;
+                        zex_runtime.close_requested = true;
+                    }
+                } else {
+                    pending_zex_program = app;
+                }
                 return true;
             }
         }
     }
-    if (mouse_y >= screen_bottom - 62 && mouse_y < screen_bottom - 14 &&
-        mouse_x >= 178 && mouse_x < 428 &&
-        (mouse_x - 178) % 50 < 42) {
-        pending_zex_program = static_cast<uint32_t>((mouse_x - 178) / 50);
-        pending_start_menu = false;
-        zex_runtime.close_requested = true;
-        return true;
-    }
     if (mouse_x >= 22 && mouse_x < 74 &&
         mouse_y >= screen_bottom - 64 && mouse_y < screen_bottom - 12) {
         pending_start_menu = true;
-        pending_zex_program = no_pending_zex_program;
-        zex_runtime.close_requested = true;
         return true;
     }
     return false;
