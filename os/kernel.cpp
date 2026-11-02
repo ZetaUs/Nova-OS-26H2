@@ -42,7 +42,7 @@ static bool keyboard_extended;
 static bool keyboard_alt_down;
 static uint8_t menu_selection;
 static const uint32_t desktop_icon_source_size = 96;
-static const uint32_t desktop_icon_size = 96;
+static const uint32_t desktop_icon_size = 64;
 static const uint32_t no_pending_zex_program = 0xFFFFFFFF;
 static bool context_menu_open;
 static bool context_menu_new_open;
@@ -552,18 +552,30 @@ static void draw_desktop_app_icon_source(int x, int y, uint8_t app) {
 }
 
 static void draw_desktop_app_icon(int x, int y, uint8_t app) {
-    draw_desktop_app_icon_source(x, y, app);
-
+    uint32_t* const target = render_target;
     const uint32_t row_stride = screen_pitch / 4;
     for (uint32_t row = 0; row < desktop_icon_source_size; ++row) {
-        const uint32_t* source =
-            render_target + static_cast<uint32_t>(y + row) * row_stride + x;
+        const uint32_t* source = target +
+            static_cast<uint32_t>(y + row) * row_stride + x;
         uint32_t* destination =
             desktop_icon_source + row * desktop_icon_source_size;
         for (uint32_t column = 0; column < desktop_icon_source_size; ++column) {
             destination[column] = source[column];
         }
     }
+
+    const uint32_t saved_width = screen_width;
+    const uint32_t saved_height = screen_height;
+    const uint32_t saved_pitch = screen_pitch;
+    render_target = desktop_icon_source;
+    screen_width = desktop_icon_source_size;
+    screen_height = desktop_icon_source_size;
+    screen_pitch = desktop_icon_source_size * sizeof(uint32_t);
+    draw_desktop_app_icon_source(0, 0, app);
+    render_target = target;
+    screen_width = saved_width;
+    screen_height = saved_height;
+    screen_pitch = saved_pitch;
 
     for (uint32_t row = 0; row < desktop_icon_size; ++row) {
         const int32_t source_y_fixed = static_cast<int32_t>(
@@ -577,7 +589,7 @@ static void draw_desktop_app_icon(int x, int y, uint8_t app) {
         const uint32_t fraction_y = source_y_fixed <= 0
             ? 0 : static_cast<uint32_t>(source_y_fixed) & 0xFFFF;
         uint32_t* destination =
-            render_target + static_cast<uint32_t>(y + row) * row_stride + x;
+            target + static_cast<uint32_t>(y + row) * row_stride + x;
 
         for (uint32_t column = 0; column < desktop_icon_size; ++column) {
             const int32_t source_x_fixed = static_cast<int32_t>(
@@ -614,14 +626,14 @@ static void draw_desktop_icon_label(const char* text, int center_x, int y,
 }
 
 static int desktop_icon_top(uint8_t app) {
-    return 54 + static_cast<int>(app) * 132;
+    return 36 + static_cast<int>(app) * 98;
 }
 
 static uint32_t desktop_app_at(int x, int y) {
-    if (x < 44 || x >= 160) return no_pending_zex_program;
+    if (x < 42 || x >= 162) return no_pending_zex_program;
     for (uint8_t app = 0; app < 5; ++app) {
         const int top = desktop_icon_top(app);
-        if (y >= top && y < top + 126) return app;
+        if (y >= top && y < top + 94) return app;
     }
     return no_pending_zex_program;
 }
@@ -1209,7 +1221,7 @@ static void draw_desktop() {
     static const uint8_t label_lengths[5] = { 5, 3, 3, 2, 2 };
     for (uint8_t app = 0; app < 5; ++app) {
         const int icon_y = desktop_icon_top(app);
-        draw_desktop_app_icon(54, icon_y, app == 0 ? 0 : app + 1);
+        draw_desktop_app_icon(70, icon_y, app == 0 ? 0 : app + 1);
         draw_desktop_icon_label(
             zex_program_names[app], 102,
             icon_y + static_cast<int>(desktop_icon_size) + 4,
