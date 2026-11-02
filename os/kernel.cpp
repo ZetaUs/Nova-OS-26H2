@@ -1672,6 +1672,32 @@ static bool mount_fat_volume(FatVolume& volume) {
     return true;
 }
 
+static bool mount_nova_data_volume(FatVolume& volume) {
+    static const uint8_t drive_order[4] = {2, 0, 1, 3};
+    static const char volume_label[] = "NOVA DATA  ";
+    for (uint32_t index = 0; index < 4; ++index) {
+        volume.ata_drive = drive_order[index];
+        if (!mount_fat_volume(volume) || volume.fat_type != 16 ||
+            !ata_read_sector(volume.ata_drive, volume.partition_start,
+                             ata_sector_buffer)) {
+            volume.mounted = false;
+            continue;
+        }
+
+        bool matches_label = true;
+        for (uint32_t byte = 0; byte < sizeof(volume_label) - 1; ++byte) {
+            if (ata_sector_buffer[43 + byte] !=
+                static_cast<uint8_t>(volume_label[byte])) {
+                matches_label = false;
+                break;
+            }
+        }
+        if (matches_label) return true;
+        volume.mounted = false;
+    }
+    return false;
+}
+
 static bool read_fat_byte(const FatVolume& volume, uint32_t offset, uint8_t& value) {
     const uint32_t sector = offset / 512;
     if (sector >= volume.fat_sectors ||
@@ -2195,13 +2221,12 @@ static void begin_create_dialog(bool directory) {
     create_dialog_directory = directory;
     create_dialog_file_manager = context_menu_file_manager;
     create_dialog_volume = 0;
-    file_manager_volumes[0].ata_drive = 2;
     create_dialog_parent_cluster =
         context_menu_file_manager ? file_manager_directory_cluster : 0;
     create_dialog_name_length = 0;
     create_dialog_name[0] = '\0';
     create_dialog_error[0] = '\0';
-    if (!mount_fat_volume(file_manager_volumes[0])) {
+    if (!mount_nova_data_volume(file_manager_volumes[0])) {
         copy_zex_literal(create_dialog_error, sizeof(create_dialog_error),
                          "A: data disk unavailable");
     }
@@ -2767,9 +2792,8 @@ static void run_zex_file_manager() {
     position_zex_window();
     zex_runtime.window_order = ++next_window_order;
     copy_zex_literal(zex_runtime.title, sizeof(zex_runtime.title), "文件管理器");
-    file_manager_volumes[0].ata_drive = 2;
     file_manager_volumes[1].ata_drive = 1;
-    mount_fat_volume(file_manager_volumes[0]);
+    mount_nova_data_volume(file_manager_volumes[0]);
     mount_fat_volume(file_manager_volumes[1]);
     file_manager_volume_index = file_manager_volumes[1].mounted ? 1 : 0;
     file_manager_directory_cluster = 0;
