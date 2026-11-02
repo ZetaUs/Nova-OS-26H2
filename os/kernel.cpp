@@ -2195,6 +2195,7 @@ static void begin_create_dialog(bool directory) {
     create_dialog_directory = directory;
     create_dialog_file_manager = context_menu_file_manager;
     create_dialog_volume = 0;
+    file_manager_volumes[0].ata_drive = 2;
     create_dialog_parent_cluster =
         context_menu_file_manager ? file_manager_directory_cluster : 0;
     create_dialog_name_length = 0;
