@@ -42,6 +42,15 @@ start:
     int 0x13
     jc kernel_error
 
+    mov word [kernel_dap + 4], 0
+    mov word [kernel_dap + 6], 0x2000
+    mov dword [kernel_dap + 8], 136
+    mov si, kernel_dap
+    mov dl, [boot_drive]
+    mov ah, 0x42
+    int 0x13
+    jc kernel_error
+
     cli
     lgdt [gdt_descriptor]
     mov eax, cr0

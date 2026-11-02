@@ -16,6 +16,12 @@ static void draw_mouse_cursor();
 static void handle_mouse_packet();
 static void close_context_menu();
 static void refresh_file_manager_volume();
+static void reload_file_manager_directory();
+static void copy_zex_literal(char* destination, uint32_t capacity,
+                             const char* source);
+static void begin_create_dialog(bool directory);
+static void draw_create_dialog();
+static bool handle_create_dialog_key(uint8_t scan_code, bool extended);
 
 #include <logo_data.h>
 #include <mouse_cursor_data.h>
@@ -62,7 +68,7 @@ static const uintptr_t start_menu_cache_address = 0x02800000;
 static const uint32_t start_menu_width = 570;
 static const uint32_t start_menu_height = 530;
 static const uintptr_t wallpaper_address = 0x03000000;
-static const uint32_t wallpaper_lba = 136;
+static const uint32_t wallpaper_lba = 263;
 static const uintptr_t zex_load_address = 0x00400000;
 static const uint32_t wallpaper_width = 1920;
 static const uint32_t wallpaper_height = 1080;
@@ -71,6 +77,14 @@ static const uint32_t file_manager_rows = 4;
 static const uint32_t file_manager_visible_entries =
     file_manager_columns * file_manager_rows;
 static const uint32_t file_manager_entry_limit = 128;
+static bool create_dialog_open;
+static bool create_dialog_directory;
+static bool create_dialog_file_manager;
+static uint8_t create_dialog_volume;
+static uint32_t create_dialog_parent_cluster;
+static uint8_t create_dialog_name_length;
+static char create_dialog_name[13];
+static char create_dialog_error[48];
 
 struct ZexRegisterFrame {
     uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
@@ -1111,6 +1125,12 @@ static int context_menu_width() {
     return context_menu_new_open ? 322 : 194;
 }
 
+static bool context_menu_create_available() {
+    return !context_menu_file_manager ||
+           (file_manager_volume_index == 0 &&
+            file_manager_volumes[0].mounted);
+}
+
 static void draw_context_menu() {
     if (!context_menu_open) return;
     const uint32_t panel = 0xF0182B40;
@@ -1128,8 +1148,9 @@ static void draw_context_menu() {
                                    0x315A7D, 0x1B3D5B);
     }
     draw_text("刷新", context_menu_x + 18, first_row + 6, 1, 0xFFFFFF);
-    draw_text("新建", context_menu_x + 18, second_row + 6, 1,
-              context_menu_new_open ? 0xFFFFFF : 0xD6E4F2);
+    const uint32_t create_color = context_menu_create_available()
+        ? (context_menu_new_open ? 0xFFFFFF : 0xD6E4F2) : 0x71849A;
+    draw_text("新建", context_menu_x + 18, second_row + 6, 1, create_color);
     draw_text(">", context_menu_x + 163, second_row + 6, 1, 0xD6E4F2);
     draw_text("粘贴", context_menu_x + 18, third_row + 6, 1, 0x71849A);
     fill_rect(context_menu_x + 12, second_row - 3, 170, 1, 0x38536F);
@@ -1142,8 +1163,10 @@ static void draw_context_menu() {
                                border, 0xFF1A2E43);
     fill_rounded_rect_gradient(submenu_x + 2, submenu_y + 2, 130, 74, 6,
                                panel, 0xE80F1D2B);
-    draw_text("文件", submenu_x + 16, submenu_y + 12, 1, 0x71849A);
-    draw_text("文件夹", submenu_x + 16, submenu_y + 46, 1, 0x71849A);
+    const uint32_t submenu_color = context_menu_create_available()
+        ? 0xFFFFFF : 0x71849A;
+    draw_text("文件", submenu_x + 16, submenu_y + 12, 1, submenu_color);
+    draw_text("文件夹", submenu_x + 16, submenu_y + 46, 1, submenu_color);
 }
 
 static void redraw_context_menu_scene() {
@@ -1157,6 +1180,13 @@ static void redraw_context_menu_scene() {
         draw_context_menu();
         present_rect(context_menu_x, context_menu_y,
                      context_menu_width(), 140);
+    }
+    if (create_dialog_open) {
+        render_target = reinterpret_cast<uint32_t*>(backbuffer_address);
+        draw_create_dialog();
+        const int dialog_x = (static_cast<int>(screen_width) - 440) / 2;
+        const int dialog_y = (static_cast<int>(screen_height) - 220) / 2;
+        present_rect(dialog_x, dialog_y, 440, 220);
     }
     draw_mouse_cursor();
 }
@@ -1197,8 +1227,10 @@ static bool handle_context_menu_click() {
     }
     if (local_x >= 0 && local_x < 194 &&
         local_y >= 43 && local_y < 79) {
-        context_menu_new_open = true;
-        redraw_context_menu_scene();
+        if (context_menu_create_available()) {
+            context_menu_new_open = true;
+            redraw_context_menu_scene();
+        }
         return true;
     }
     if (local_x >= 0 && local_x < 194 &&
@@ -1206,7 +1238,19 @@ static bool handle_context_menu_click() {
         return true;
     }
     if (context_menu_new_open && local_x >= 188 && local_x < 322 &&
-        local_y >= 39 && local_y < 117) {
+        local_y >= 39 && local_y < 77 &&
+        context_menu_create_available()) {
+        context_menu_open = false;
+        context_menu_new_open = false;
+        begin_create_dialog(false);
+        return true;
+    }
+    if (context_menu_new_open && local_x >= 188 && local_x < 322 &&
+        local_y >= 77 && local_y < 117 &&
+        context_menu_create_available()) {
+        context_menu_open = false;
+        context_menu_new_open = false;
+        begin_create_dialog(true);
         return true;
     }
 
@@ -1499,6 +1543,35 @@ static bool ata_read_sector(uint8_t drive, uint32_t lba, uint8_t* destination) {
     for (uint32_t index = 0; index < 256; ++index) {
         words[index] = in16(base);
     }
+    return ata_wait(base, false);
+}
+
+static bool ata_write_sector(uint8_t drive, uint32_t lba,
+                             const uint8_t* source) {
+    const uint16_t base = drive < 2 ? 0x1F0 : 0x170;
+    const uint8_t unit = drive & 1;
+    if (lba >= 0x10000000) return false;
+
+    out8(base + 6, static_cast<uint8_t>(
+        0xE0 | (unit << 4) | ((lba >> 24) & 0x0F)
+    ));
+    for (uint32_t delay = 0; delay < 4; ++delay) {
+        (void)in8(base + 0x206);
+    }
+    if (!ata_wait(base, false)) return false;
+    out8(base + 2, 1);
+    out8(base + 3, static_cast<uint8_t>(lba));
+    out8(base + 4, static_cast<uint8_t>(lba >> 8));
+    out8(base + 5, static_cast<uint8_t>(lba >> 16));
+    out8(base + 7, 0x30);
+    if (!ata_wait(base, true)) return false;
+
+    const uint16_t* words = reinterpret_cast<const uint16_t*>(source);
+    for (uint32_t index = 0; index < 256; ++index) {
+        out16(base, words[index]);
+    }
+    if (!ata_wait(base, false)) return false;
+    out8(base + 7, 0xE7);
     return ata_wait(base, false);
 }
 
@@ -1815,6 +1888,399 @@ static bool load_file_manager_directory() {
     return false;
 }
 
+static uint32_t fat16_cluster_count(const FatVolume& volume) {
+    return (volume.total_sectors - volume.data_sector) /
+           volume.sectors_per_cluster;
+}
+
+static bool fat16_cluster_sector(const FatVolume& volume, uint32_t cluster,
+                                 uint32_t sector, uint32_t& lba) {
+    const uint32_t cluster_count = fat16_cluster_count(volume);
+    if (cluster < 2 || cluster - 2 >= cluster_count ||
+        sector >= volume.sectors_per_cluster) return false;
+    lba = volume.partition_start + volume.data_sector +
+          (cluster - 2) * volume.sectors_per_cluster + sector;
+    return true;
+}
+
+static bool write_fat16_entry(const FatVolume& volume, uint32_t cluster,
+                              uint16_t value) {
+    if (!volume.mounted || volume.fat_type != 16) return false;
+    const uint32_t offset = cluster * 2;
+    const uint32_t sector = offset / 512;
+    if (sector >= volume.fat_sectors) return false;
+    for (uint32_t copy = 0; copy < volume.fat_count; ++copy) {
+        const uint32_t lba = volume.partition_start + volume.reserved_sectors +
+            copy * volume.fat_sectors + sector;
+        if (!ata_read_sector(volume.ata_drive, lba, ata_sector_buffer)) {
+            return false;
+        }
+        ata_sector_buffer[offset & 511] = static_cast<uint8_t>(value);
+        ata_sector_buffer[(offset & 511) + 1] =
+            static_cast<uint8_t>(value >> 8);
+        if (!ata_write_sector(volume.ata_drive, lba, ata_sector_buffer)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool clear_fat16_cluster(const FatVolume& volume, uint32_t cluster) {
+    for (uint32_t sector = 0; sector < volume.sectors_per_cluster; ++sector) {
+        uint32_t lba;
+        if (!fat16_cluster_sector(volume, cluster, sector, lba)) return false;
+        for (uint32_t byte = 0; byte < sizeof(directory_sector_buffer); ++byte) {
+            directory_sector_buffer[byte] = 0;
+        }
+        if (!ata_write_sector(volume.ata_drive, lba,
+                              directory_sector_buffer)) return false;
+    }
+    return true;
+}
+
+static bool allocate_fat16_cluster(const FatVolume& volume,
+                                   uint32_t& allocated_cluster) {
+    if (!volume.mounted || volume.fat_type != 16) return false;
+    const uint32_t cluster_count = fat16_cluster_count(volume);
+    for (uint32_t cluster = 2; cluster < cluster_count + 2; ++cluster) {
+        uint32_t next;
+        if (!read_fat_entry(volume, cluster, next)) return false;
+        if (next != 0) continue;
+        if (!write_fat16_entry(volume, cluster, 0xFFFF)) return false;
+        if (!clear_fat16_cluster(volume, cluster)) {
+            (void)write_fat16_entry(volume, cluster, 0);
+            return false;
+        }
+        allocated_cluster = cluster;
+        return true;
+    }
+    return false;
+}
+
+static bool find_fat16_directory_slot(const FatVolume& volume,
+                                     uint32_t directory_cluster,
+                                     uint32_t& slot_lba,
+                                     uint32_t& slot_offset) {
+    if (directory_cluster == 0) {
+        for (uint32_t sector = 0; sector < volume.root_sectors; ++sector) {
+            const uint32_t lba = volume.partition_start +
+                                 volume.root_sector + sector;
+            if (!ata_read_sector(volume.ata_drive, lba,
+                                 directory_sector_buffer)) return false;
+            for (uint32_t offset = 0; offset < 512; offset += 32) {
+                if (directory_sector_buffer[offset] == 0 ||
+                    directory_sector_buffer[offset] == 0xE5) {
+                    slot_lba = lba;
+                    slot_offset = offset;
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    uint32_t cluster = directory_cluster;
+    const uint32_t cluster_count = fat16_cluster_count(volume);
+    for (uint32_t chain = 0; chain < cluster_count; ++chain) {
+        for (uint32_t sector = 0; sector < volume.sectors_per_cluster;
+             ++sector) {
+            uint32_t lba;
+            if (!fat16_cluster_sector(volume, cluster, sector, lba) ||
+                !ata_read_sector(volume.ata_drive, lba,
+                                 directory_sector_buffer)) return false;
+            for (uint32_t offset = 0; offset < 512; offset += 32) {
+                if (directory_sector_buffer[offset] == 0 ||
+                    directory_sector_buffer[offset] == 0xE5) {
+                    slot_lba = lba;
+                    slot_offset = offset;
+                    return true;
+                }
+            }
+        }
+        uint32_t next;
+        if (!read_fat_entry(volume, cluster, next)) return false;
+        if (next >= 0xFFF8) return false;
+        cluster = next;
+    }
+    return false;
+}
+
+static int fat16_name_exists(const FatVolume& volume,
+                             uint32_t directory_cluster,
+                             const uint8_t name[11]) {
+    uint32_t cluster = directory_cluster;
+    const uint32_t cluster_count = fat16_cluster_count(volume);
+    const uint32_t sector_count = directory_cluster == 0
+        ? volume.root_sectors : volume.sectors_per_cluster;
+    for (uint32_t chain = 0; chain < (directory_cluster == 0 ? 1 : cluster_count);
+         ++chain) {
+        for (uint32_t sector = 0; sector < sector_count; ++sector) {
+            uint32_t lba;
+            if (directory_cluster == 0) {
+                lba = volume.partition_start + volume.root_sector + sector;
+            } else if (!fat16_cluster_sector(volume, cluster, sector, lba)) {
+                return -1;
+            }
+            if (!ata_read_sector(volume.ata_drive, lba,
+                                 directory_sector_buffer)) return -1;
+            for (uint32_t offset = 0; offset < 512; offset += 32) {
+                const uint8_t* entry = directory_sector_buffer + offset;
+                if (entry[0] == 0) return 0;
+                if (entry[0] == 0xE5 || entry[11] == 0x0F ||
+                    (entry[11] & 0x08) != 0) continue;
+                bool equal = true;
+                for (uint32_t byte = 0; byte < 11; ++byte) {
+                    if (entry[byte] != name[byte]) {
+                        equal = false;
+                        break;
+                    }
+                }
+                if (equal) return 1;
+            }
+        }
+        if (directory_cluster == 0) return 0;
+        uint32_t next;
+        if (!read_fat_entry(volume, cluster, next)) return -1;
+        if (next >= 0xFFF8) return 0;
+        if (next < 2 || next - 2 >= cluster_count) return -1;
+        cluster = next;
+    }
+    return -1;
+}
+
+static bool parse_fat16_short_name(const char* name, uint8_t output[11]) {
+    for (uint32_t byte = 0; byte < 11; ++byte) output[byte] = ' ';
+    uint32_t base_length = 0;
+    uint32_t extension_length = 0;
+    bool in_extension = false;
+    if (name[0] == '\0') return false;
+    for (uint32_t index = 0; name[index] != '\0'; ++index) {
+        char character = name[index];
+        if (character == '.') {
+            if (in_extension || base_length == 0) return false;
+            in_extension = true;
+            continue;
+        }
+        if (character >= 'a' && character <= 'z') {
+            character = static_cast<char>(character - 'a' + 'A');
+        }
+        const bool valid = (character >= 'A' && character <= 'Z') ||
+            (character >= '0' && character <= '9') ||
+            character == '-' || character == '_';
+        if (!valid) return false;
+        if (in_extension) {
+            if (++extension_length > 3) return false;
+            output[8 + extension_length - 1] =
+                static_cast<uint8_t>(character);
+        } else {
+            if (++base_length > 8) return false;
+            output[base_length - 1] = static_cast<uint8_t>(character);
+        }
+    }
+    return base_length != 0 && (!in_extension || extension_length != 0);
+}
+
+static bool initialize_fat16_directory(const FatVolume& volume,
+                                       uint32_t cluster,
+                                       uint32_t parent_cluster) {
+    uint32_t lba;
+    if (!fat16_cluster_sector(volume, cluster, 0, lba) ||
+        !ata_read_sector(volume.ata_drive, lba, directory_sector_buffer)) {
+        return false;
+    }
+    directory_sector_buffer[0] = '.';
+    for (uint32_t index = 1; index < 11; ++index) {
+        directory_sector_buffer[index] = ' ';
+    }
+    directory_sector_buffer[11] = 0x10;
+    directory_sector_buffer[26] = static_cast<uint8_t>(cluster);
+    directory_sector_buffer[27] = static_cast<uint8_t>(cluster >> 8);
+    directory_sector_buffer[32] = '.';
+    directory_sector_buffer[33] = '.';
+    for (uint32_t index = 34; index < 43; ++index) {
+        directory_sector_buffer[index] = ' ';
+    }
+    directory_sector_buffer[43] = 0x10;
+    directory_sector_buffer[58] = static_cast<uint8_t>(parent_cluster);
+    directory_sector_buffer[59] = static_cast<uint8_t>(parent_cluster >> 8);
+    return ata_write_sector(volume.ata_drive, lba, directory_sector_buffer);
+}
+
+static bool create_fat16_entry(const FatVolume& volume,
+                               uint32_t parent_cluster,
+                               const char* name, bool directory) {
+    if (!volume.mounted || volume.fat_type != 16) return false;
+    uint8_t short_name[11];
+    if (!parse_fat16_short_name(name, short_name)) return false;
+    const int exists = fat16_name_exists(volume, parent_cluster, short_name);
+    if (exists != 0) return false;
+
+    uint32_t slot_lba;
+    uint32_t slot_offset;
+    if (!find_fat16_directory_slot(volume, parent_cluster,
+                                   slot_lba, slot_offset)) return false;
+
+    uint32_t child_cluster = 0;
+    if (directory &&
+        !allocate_fat16_cluster(volume, child_cluster)) return false;
+    if (directory &&
+        !initialize_fat16_directory(volume, child_cluster, parent_cluster)) {
+        (void)write_fat16_entry(volume, child_cluster, 0);
+        return false;
+    }
+
+    if (!ata_read_sector(volume.ata_drive, slot_lba, directory_sector_buffer)) {
+        if (directory) (void)write_fat16_entry(volume, child_cluster, 0);
+        return false;
+    }
+    uint8_t* entry = directory_sector_buffer + slot_offset;
+    for (uint32_t byte = 0; byte < 11; ++byte) {
+        entry[byte] = short_name[byte];
+    }
+    entry[11] = directory ? 0x10 : 0x20;
+    entry[12] = 0;
+    entry[13] = 0;
+    entry[14] = 0;
+    entry[15] = 0;
+    entry[16] = 0;
+    entry[17] = 0;
+    entry[18] = 0;
+    entry[19] = 0;
+    entry[20] = 0;
+    entry[21] = 0;
+    entry[22] = 0;
+    entry[23] = 0;
+    entry[24] = 0;
+    entry[25] = 0;
+    entry[26] = static_cast<uint8_t>(child_cluster);
+    entry[27] = static_cast<uint8_t>(child_cluster >> 8);
+    entry[28] = 0;
+    entry[29] = 0;
+    entry[30] = 0;
+    entry[31] = 0;
+    if (!ata_write_sector(volume.ata_drive, slot_lba,
+                          directory_sector_buffer)) {
+        if (directory) (void)write_fat16_entry(volume, child_cluster, 0);
+        return false;
+    }
+    return true;
+}
+
+static void begin_create_dialog(bool directory) {
+    create_dialog_directory = directory;
+    create_dialog_file_manager = context_menu_file_manager;
+    create_dialog_volume = 0;
+    create_dialog_parent_cluster =
+        context_menu_file_manager ? file_manager_directory_cluster : 0;
+    create_dialog_name_length = 0;
+    create_dialog_name[0] = '\0';
+    create_dialog_error[0] = '\0';
+    if (!mount_fat_volume(file_manager_volumes[0])) {
+        copy_zex_literal(create_dialog_error, sizeof(create_dialog_error),
+                         "A: data disk unavailable");
+    }
+    create_dialog_open = true;
+    redraw_context_menu_scene();
+}
+
+static void draw_create_dialog() {
+    const int x = (static_cast<int>(screen_width) - 440) / 2;
+    const int y = (static_cast<int>(screen_height) - 220) / 2;
+    fill_rounded_rect_gradient(x, y, 440, 220, 12, 0xFF52718D, 0xFF1A2E43);
+    fill_rounded_rect_gradient(x + 2, y + 2, 436, 216, 10,
+                               0xF0182B40, 0xE80F1D2B);
+    fill_rounded_rect_gradient(x + 4, y + 4, 432, 42, 8,
+                               0x28618C, 0x17466D);
+    fill_rect(x + 4, y + 34, 432, 12, 0x17466D);
+    draw_text(create_dialog_directory ? "新建文件夹" : "新建文件",
+              x + 20, y + 15, 1, 0xFFFFFF);
+    draw_text("8.3 Name:", x + 24, y + 82, 1, 0xE3EDF7);
+    fill_rounded_rect_gradient(x + 24, y + 112, 392, 42, 6,
+                               0x0C1C2C, 0x10253B);
+    fill_rect(x + 24, y + 112, 392, 1, 0x54718D);
+
+    char visible_name[14];
+    for (uint32_t index = 0; index < create_dialog_name_length; ++index) {
+        visible_name[index] = create_dialog_name[index];
+    }
+    visible_name[create_dialog_name_length] = '_';
+    visible_name[create_dialog_name_length + 1] = '\0';
+    draw_text(visible_name, x + 36, y + 122, 1, 0xFFFFFF);
+    if (create_dialog_error[0] != '\0') {
+        draw_text(create_dialog_error, x + 24, y + 166, 1, 0xFFB7A8);
+    } else {
+        draw_text("Enter: create    Esc: cancel", x + 24, y + 166, 1,
+                  0x9BB1C8);
+    }
+}
+
+static char create_dialog_character(uint8_t scan_code) {
+    if (scan_code >= 0x02 && scan_code <= 0x0B) {
+        return "1234567890"[scan_code - 0x02];
+    }
+    if (scan_code >= 0x10 && scan_code <= 0x19) {
+        return "qwertyuiop"[scan_code - 0x10];
+    }
+    if (scan_code >= 0x1E && scan_code <= 0x26) {
+        return "asdfghjkl"[scan_code - 0x1E];
+    }
+    if (scan_code >= 0x2C && scan_code <= 0x32) {
+        return "zxcvbnm"[scan_code - 0x2C];
+    }
+    if (scan_code == 0x0C) return '-';
+    if (scan_code == 0x34) return '.';
+    return '\0';
+}
+
+static bool handle_create_dialog_key(uint8_t scan_code, bool extended) {
+    if (!create_dialog_open) return false;
+    if ((scan_code & 0x80) != 0) return true;
+    if (extended) return true;
+    if (scan_code == 0x01) {
+        create_dialog_open = false;
+        redraw_context_menu_scene();
+        return true;
+    }
+    if (scan_code == 0x0E) {
+        if (create_dialog_name_length != 0) {
+            --create_dialog_name_length;
+            create_dialog_name[create_dialog_name_length] = '\0';
+            create_dialog_error[0] = '\0';
+            redraw_context_menu_scene();
+        }
+        return true;
+    }
+    if (scan_code == 0x1C) {
+        if (create_fat16_entry(file_manager_volumes[create_dialog_volume],
+                               create_dialog_parent_cluster,
+                               create_dialog_name,
+                               create_dialog_directory)) {
+            create_dialog_open = false;
+            if (create_dialog_file_manager) {
+                reload_file_manager_directory();
+            } else {
+                redraw_context_menu_scene();
+            }
+        } else {
+            copy_zex_literal(
+                create_dialog_error, sizeof(create_dialog_error),
+                "Invalid, duplicate, or no space"
+            );
+            redraw_context_menu_scene();
+        }
+        return true;
+    }
+
+    const char character = create_dialog_character(scan_code);
+    if (character != '\0' && create_dialog_name_length < 12) {
+        create_dialog_name[create_dialog_name_length++] = character;
+        create_dialog_name[create_dialog_name_length] = '\0';
+        create_dialog_error[0] = '\0';
+        redraw_context_menu_scene();
+    }
+    return true;
+}
+
 static void install_zex_syscall_gate() {
     const uintptr_t handler = reinterpret_cast<uintptr_t>(&zex_interrupt_handler);
     ZexIdtEntry& gate = zex_idt[0x80];
@@ -1950,6 +2416,9 @@ static bool handle_running_app_key(uint8_t key, bool extended, bool released) {
         return true;
     }
     if (released) return true;
+    if (create_dialog_open) {
+        return handle_create_dialog_key(key, extended);
+    }
 
     if (extended && (key == 0x5B || key == 0x5C)) {
         restore_mouse_cursor();
@@ -2858,7 +3327,9 @@ extern "C" __attribute__((noreturn)) void kernel_main(
             } else {
                 const bool extended = keyboard_extended;
                 keyboard_extended = false;
-                if (extended && (scan_code == 0x5B || scan_code == 0x5C)) {
+                if (create_dialog_open) {
+                    handle_create_dialog_key(scan_code, extended);
+                } else if (extended && (scan_code == 0x5B || scan_code == 0x5C)) {
                     restore_mouse_cursor();
                     start_menu_open = !start_menu_open;
                     refresh_start_menu();
