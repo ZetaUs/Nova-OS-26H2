@@ -68,7 +68,7 @@ static const uintptr_t start_menu_cache_address = 0x02800000;
 static const uint32_t start_menu_width = 570;
 static const uint32_t start_menu_height = 530;
 static const uintptr_t wallpaper_address = 0x03000000;
-static const uint32_t wallpaper_lba = 263;
+static const uint32_t wallpaper_lba = 265;
 static const uintptr_t zex_load_address = 0x00400000;
 static const uint32_t wallpaper_width = 1920;
 static const uint32_t wallpaper_height = 1080;
@@ -3183,6 +3183,12 @@ static void handle_mouse_packet() {
                -static_cast<int8_t>(mouse_packet[2]));
 
     const uint8_t buttons = flags & 7;
+    if (create_dialog_open) {
+        mouse_buttons = buttons;
+        draw_mouse_cursor();
+        return;
+    }
+
     if ((buttons & 2) != 0 && (mouse_buttons & 2) == 0) {
         const uint32_t clicked_window = zex_window_at_mouse();
         if (clicked_window == no_pending_zex_program) {

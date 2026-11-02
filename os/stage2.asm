@@ -36,20 +36,20 @@ start:
     cmp ax, 0x004F
     jne vbe_error
 
-    mov si, kernel_dap
-    mov dl, [boot_drive]
-    mov ah, 0x42
-    int 0x13
-    jc kernel_error
-
     mov word [kernel_dap + 4], 0
-    mov word [kernel_dap + 6], 0x2000
-    mov dword [kernel_dap + 8], 136
+    mov word [kernel_dap + 6], 0x1000
+    mov dword [kernel_dap + 8], 9
+    mov byte [kernel_chunks_left], 4
+.load_kernel_chunk:
     mov si, kernel_dap
     mov dl, [boot_drive]
     mov ah, 0x42
     int 0x13
     jc kernel_error
+    add word [kernel_dap + 6], 0x0800
+    add dword [kernel_dap + 8], 64
+    dec byte [kernel_chunks_left]
+    jnz .load_kernel_chunk
 
     cli
     lgdt [gdt_descriptor]
@@ -94,11 +94,12 @@ gdt_descriptor:
 
 kernel_dap:
     db 0x10, 0
-    dw 127
+    dw 64
     dw 0
     dw 0x1000
     dd 9
     dd 0
+kernel_chunks_left: db 0
 
 boot_drive: db 0
 vbe_error_message: db 'Nova OS: VBE mode unavailable', 0
