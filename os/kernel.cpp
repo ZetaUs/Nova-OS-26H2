@@ -1199,7 +1199,7 @@ static void open_context_menu(bool file_manager) {
     context_menu_x = mouse_x;
     context_menu_y = mouse_y;
     const int max_x = static_cast<int>(screen_width) - 322;
-    const int max_y = static_cast<int>(screen_height) - 140;
+    const int max_y = static_cast<int>(screen_height) - 195;
     if (context_menu_x > max_x) context_menu_x = max_x;
     if (context_menu_y > max_y) context_menu_y = max_y;
     redraw_context_menu_scene();
@@ -2106,32 +2106,57 @@ static bool initialize_fat16_directory(const FatVolume& volume,
     return ata_write_sector(volume.ata_drive, lba, directory_sector_buffer);
 }
 
-static bool create_fat16_entry(const FatVolume& volume,
-                               uint32_t parent_cluster,
-                               const char* name, bool directory) {
-    if (!volume.mounted || volume.fat_type != 16) return false;
+enum Fat16CreateResult {
+    fat16_create_success,
+    fat16_create_unsupported_volume,
+    fat16_create_invalid_name,
+    fat16_create_directory_read_failed,
+    fat16_create_duplicate_name,
+    fat16_create_directory_full,
+    fat16_create_no_space,
+    fat16_create_directory_init_failed,
+    fat16_create_entry_read_failed,
+    fat16_create_entry_write_failed
+};
+
+static Fat16CreateResult create_fat16_entry(
+    const FatVolume& volume,
+    uint32_t parent_cluster,
+    const char* name,
+    bool directory
+) {
+    if (!volume.mounted || volume.fat_type != 16) {
+        return fat16_create_unsupported_volume;
+    }
     uint8_t short_name[11];
-    if (!parse_fat16_short_name(name, short_name)) return false;
+    if (!parse_fat16_short_name(name, short_name)) {
+        return fat16_create_invalid_name;
+    }
     const int exists = fat16_name_exists(volume, parent_cluster, short_name);
-    if (exists != 0) return false;
+    if (exists < 0) return fat16_create_directory_read_failed;
+    if (exists != 0) return fat16_create_duplicate_name;
 
     uint32_t slot_lba;
     uint32_t slot_offset;
     if (!find_fat16_directory_slot(volume, parent_cluster,
-                                   slot_lba, slot_offset)) return false;
+                                   slot_lba, slot_offset)) {
+        return fat16_create_directory_full;
+    }
 
     uint32_t child_cluster = 0;
     if (directory &&
-        !allocate_fat16_cluster(volume, child_cluster)) return false;
+        !allocate_fat16_cluster(volume, child_cluster)) {
+        return fat16_create_no_space;
+    }
     if (directory &&
         !initialize_fat16_directory(volume, child_cluster, parent_cluster)) {
         (void)write_fat16_entry(volume, child_cluster, 0);
-        return false;
+        return fat16_create_directory_init_failed;
     }
 
     if (!ata_read_sector(volume.ata_drive, slot_lba, directory_sector_buffer)) {
         if (directory) (void)write_fat16_entry(volume, child_cluster, 0);
-        return false;
+        return fat16_create_entry_read_failed;
     }
     uint8_t* entry = directory_sector_buffer + slot_offset;
     for (uint32_t byte = 0; byte < 11; ++byte) {
@@ -2161,9 +2186,9 @@ static bool create_fat16_entry(const FatVolume& volume,
     if (!ata_write_sector(volume.ata_drive, slot_lba,
                           directory_sector_buffer)) {
         if (directory) (void)write_fat16_entry(volume, child_cluster, 0);
-        return false;
+        return fat16_create_entry_write_failed;
     }
-    return true;
+    return fat16_create_success;
 }
 
 static void begin_create_dialog(bool directory) {
@@ -2251,10 +2276,13 @@ static bool handle_create_dialog_key(uint8_t scan_code, bool extended) {
         return true;
     }
     if (scan_code == 0x1C) {
-        if (create_fat16_entry(file_manager_volumes[create_dialog_volume],
-                               create_dialog_parent_cluster,
-                               create_dialog_name,
-                               create_dialog_directory)) {
+        const Fat16CreateResult result = create_fat16_entry(
+            file_manager_volumes[create_dialog_volume],
+            create_dialog_parent_cluster,
+            create_dialog_name,
+            create_dialog_directory
+        );
+        if (result == fat16_create_success) {
             create_dialog_open = false;
             if (create_dialog_file_manager) {
                 reload_file_manager_directory();
@@ -2262,10 +2290,18 @@ static bool handle_create_dialog_key(uint8_t scan_code, bool extended) {
                 redraw_context_menu_scene();
             }
         } else {
-            copy_zex_literal(
-                create_dialog_error, sizeof(create_dialog_error),
-                "Invalid, duplicate, or no space"
-            );
+            const char* message =
+                result == fat16_create_invalid_name ? "Invalid 8.3 name" :
+                result == fat16_create_directory_read_failed ? "Directory read failed" :
+                result == fat16_create_duplicate_name ? "Name already exists" :
+                result == fat16_create_directory_full ? "Directory full or read error" :
+                result == fat16_create_no_space ? "Disk full" :
+                result == fat16_create_directory_init_failed ? "Folder setup failed" :
+                result == fat16_create_entry_read_failed ? "Directory read failed" :
+                result == fat16_create_entry_write_failed ? "Disk write failed" :
+                "A: FAT16 required";
+            copy_zex_literal(create_dialog_error, sizeof(create_dialog_error),
+                             message);
             redraw_context_menu_scene();
         }
         return true;
