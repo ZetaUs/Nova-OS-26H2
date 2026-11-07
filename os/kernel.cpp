@@ -17,11 +17,15 @@ static void handle_mouse_packet();
 static void close_context_menu();
 static void refresh_file_manager_volume();
 static void reload_file_manager_directory();
+static void redraw_file_manager();
 static void copy_zex_literal(char* destination, uint32_t capacity,
                              const char* source);
+static void append_text(char* destination, uint32_t capacity,
+                        const char* source);
 static void begin_create_dialog(bool directory);
 static void draw_create_dialog();
 static bool handle_create_dialog_key(uint8_t scan_code, bool extended);
+static void paste_file_manager_clipboard(bool file_manager);
 
 #include <logo_data.h>
 #include <mouse_cursor_data.h>
@@ -144,6 +148,8 @@ struct FatVolume {
 
 struct FileManagerEntry {
     char name[64];
+    uint8_t short_name[11];
+    uint8_t attributes;
     uint32_t cluster;
     uint32_t size;
     bool directory;
@@ -165,10 +171,16 @@ static uint8_t file_manager_volume_index;
 static bool file_manager_entries_truncated;
 static bool file_manager_read_error;
 static char file_manager_status[128];
+static char file_manager_feedback[96];
 static uint16_t file_manager_long_name[260];
 static uint8_t ata_sector_buffer[512];
 static uint8_t fat_sector_buffer[512];
 static uint8_t directory_sector_buffer[512];
+static uint8_t copy_sector_buffer[512];
+static uint8_t copy_directory_entries[16][128][32];
+static FileManagerEntry file_manager_clipboard_entry;
+static uint8_t file_manager_clipboard_volume;
+static bool file_manager_clipboard_valid;
 static bool start_menu_cache_ready;
 static ZexRuntime zex_window_states[5];
 static uint32_t active_zex_program;
@@ -1048,6 +1060,7 @@ static void draw_file_manager() {
     const int main_left = divider_x + 14;
     const int main_right = x + zex_runtime.window_width - 20;
     const int toolbar_y = content_top + 4;
+    const int action_toolbar_y = toolbar_y + 38;
     const int parent_x = main_right - 170;
     const int refresh_x = main_right - 82;
 
@@ -1081,18 +1094,41 @@ static void draw_file_manager() {
                                0x315A7D, 0x1B3D5B);
     draw_text("刷新", refresh_x + 13, toolbar_y + 7, 1, 0xFFFFFF);
 
+    fill_rounded_rect_gradient(main_left, action_toolbar_y,
+                               main_right - main_left, 32, 4,
+                               0x28618C, 0x17466D);
+    const bool copy_available =
+        file_manager_volumes[file_manager_volume_index].mounted &&
+        file_manager_selected < file_manager_entry_count;
+    const int copy_x = main_left + 6;
+    const int copy_y = action_toolbar_y + 2;
+    const uint32_t copy_button_top = copy_available ? 0x315A7D : 0x35485A;
+    const uint32_t copy_button_bottom = copy_available ? 0x1B3D5B : 0x293A4A;
+    fill_rounded_rect_gradient(copy_x, copy_y, 34, 28, 4,
+                               copy_button_top, copy_button_bottom);
+    const uint32_t copy_icon = copy_available ? 0xE3EDF7 : 0x8293A3;
+    fill_rect(copy_x + 10, copy_y + 6, 12, 14, 0x16344E);
+    fill_rect(copy_x + 11, copy_y + 5, 10, 12, copy_icon);
+    fill_rect(copy_x + 13, copy_y + 8, 6, 1, 0x315A7D);
+    fill_rect(copy_x + 13, copy_y + 11, 6, 1, 0x315A7D);
+    fill_rect(copy_x + 13, copy_y + 14, 5, 1, 0x315A7D);
+    if (file_manager_feedback[0] != '\0') {
+        draw_text(file_manager_feedback, copy_x + 44, copy_y + 7, 1,
+                  0xD6E4F2);
+    }
+
     if (!file_manager_volumes[file_manager_volume_index].mounted ||
         file_manager_read_error) {
         draw_text(!file_manager_volumes[file_manager_volume_index].mounted
                       ? "卷未挂载或文件系统无效"
                       : "读取目录失败",
-                  main_left + 16, toolbar_y + 54, 1, 0xA9C3D8);
+                  main_left + 16, action_toolbar_y + 40, 1, 0xA9C3D8);
     } else if (file_manager_entry_count == 0) {
-        draw_text("此文件夹为空", main_left + 16, toolbar_y + 54, 1,
+        draw_text("此文件夹为空", main_left + 16, action_toolbar_y + 40, 1,
                   0xA9C3D8);
     } else {
         const int grid_left = main_left + 8;
-        const int grid_top = toolbar_y + 48;
+        const int grid_top = action_toolbar_y + 34;
         uint32_t visible_count = 0;
         while (visible_count < file_manager_visible_entries &&
                file_manager_scroll + visible_count < file_manager_entry_count) {
@@ -1131,6 +1167,12 @@ static bool context_menu_create_available() {
             file_manager_volumes[0].mounted);
 }
 
+static bool context_menu_paste_available() {
+    return file_manager_clipboard_valid &&
+        context_menu_file_manager && file_manager_volume_index == 0 &&
+        file_manager_volumes[0].mounted;
+}
+
 static void draw_context_menu() {
     if (!context_menu_open) return;
     const uint32_t panel = 0xF0182B40;
@@ -1152,7 +1194,8 @@ static void draw_context_menu() {
         ? (context_menu_new_open ? 0xFFFFFF : 0xD6E4F2) : 0x71849A;
     draw_text("新建", context_menu_x + 18, second_row + 6, 1, create_color);
     draw_text(">", context_menu_x + 163, second_row + 6, 1, 0xD6E4F2);
-    draw_text("粘贴", context_menu_x + 18, third_row + 6, 1, 0x71849A);
+    draw_text("粘贴", context_menu_x + 18, third_row + 6, 1,
+              context_menu_paste_available() ? 0xD6E4F2 : 0x71849A);
     fill_rect(context_menu_x + 12, second_row - 3, 170, 1, 0x38536F);
     fill_rect(context_menu_x + 12, third_row - 3, 170, 1, 0x38536F);
 
@@ -1235,6 +1278,12 @@ static bool handle_context_menu_click() {
     }
     if (local_x >= 0 && local_x < 194 &&
         local_y >= 79 && local_y < 115) {
+        if (context_menu_paste_available()) {
+            const bool file_manager = context_menu_file_manager;
+            context_menu_open = false;
+            context_menu_new_open = false;
+            paste_file_manager_clipboard(file_manager);
+        }
         return true;
     }
     if (context_menu_new_open && local_x >= 188 && local_x < 322 &&
@@ -1828,6 +1877,10 @@ static bool add_file_manager_entry(
 
     FileManagerEntry& entry = file_manager_entries[file_manager_entry_count++];
     copy_fat_name(raw, long_name, entry.name, sizeof(entry.name));
+    for (uint32_t byte = 0; byte < sizeof(entry.short_name); ++byte) {
+        entry.short_name[byte] = raw[byte];
+    }
+    entry.attributes = raw[11];
     entry.directory = (raw[11] & 0x10) != 0;
     entry.cluster = (static_cast<uint32_t>(read_le16(raw, 20)) << 16) |
                     read_le16(raw, 26);
@@ -2215,6 +2268,473 @@ static Fat16CreateResult create_fat16_entry(
         return fat16_create_entry_write_failed;
     }
     return fat16_create_success;
+}
+
+enum Fat16CopyResult {
+    fat16_copy_success,
+    fat16_copy_unsupported_destination,
+    fat16_copy_source_read_failed,
+    fat16_copy_destination_read_failed,
+    fat16_copy_destination_write_failed,
+    fat16_copy_no_space,
+    fat16_copy_duplicate_name,
+    fat16_copy_entry_limit,
+    fat16_copy_depth_limit,
+    fat16_copy_invalid_source_chain,
+    fat16_copy_into_self
+};
+
+static bool fat_volume_cluster_sector(const FatVolume& volume,
+                                     uint32_t cluster,
+                                     uint32_t sector,
+                                     uint32_t& lba) {
+    const uint32_t cluster_count =
+        (volume.total_sectors - volume.data_sector) /
+        volume.sectors_per_cluster;
+    if (cluster < 2 || cluster - 2 >= cluster_count ||
+        sector >= volume.sectors_per_cluster) return false;
+    lba = volume.partition_start + volume.data_sector +
+          (cluster - 2) * volume.sectors_per_cluster + sector;
+    return true;
+}
+
+static Fat16CopyResult insert_fat16_copy_entry(
+    const FatVolume& destination,
+    uint32_t parent_cluster,
+    const uint8_t record[32]
+) {
+    const int exists = fat16_name_exists(destination, parent_cluster, record);
+    if (exists < 0) return fat16_copy_destination_read_failed;
+    if (exists != 0) return fat16_copy_duplicate_name;
+
+    uint32_t slot_lba;
+    uint32_t slot_offset;
+    if (!find_fat16_directory_slot(destination, parent_cluster,
+                                   slot_lba, slot_offset)) {
+        return fat16_copy_entry_limit;
+    }
+    if (!ata_read_sector(destination.ata_drive, slot_lba,
+                         directory_sector_buffer)) {
+        return fat16_copy_destination_read_failed;
+    }
+    for (uint32_t byte = 0; byte < 32; ++byte) {
+        directory_sector_buffer[slot_offset + byte] = record[byte];
+    }
+    if (!ata_write_sector(destination.ata_drive, slot_lba,
+                          directory_sector_buffer)) {
+        return fat16_copy_destination_write_failed;
+    }
+    return fat16_copy_success;
+}
+
+static bool release_fat16_chain(const FatVolume& volume, uint32_t cluster) {
+    const uint32_t cluster_count = fat16_cluster_count(volume);
+    for (uint32_t count = 0; cluster >= 2 && count < cluster_count; ++count) {
+        uint32_t next;
+        if (!read_fat_entry(volume, cluster, next) ||
+            !write_fat16_entry(volume, cluster, 0)) return false;
+        if (next >= 0xFFF8) return true;
+        if (next < 2 || next - 2 >= cluster_count) return false;
+        cluster = next;
+    }
+    return cluster == 0;
+}
+
+static Fat16CopyResult copy_fat16_file_data(
+    const FatVolume& source,
+    const FatVolume& destination,
+    uint32_t source_cluster,
+    uint32_t file_size,
+    uint32_t& destination_cluster
+) {
+    destination_cluster = 0;
+    if (file_size == 0) return fat16_copy_success;
+    if (source_cluster < 2) return fat16_copy_invalid_source_chain;
+
+    const uint32_t source_cluster_count =
+        (source.total_sectors - source.data_sector) /
+        source.sectors_per_cluster;
+    uint32_t current_source_cluster = source_cluster;
+    uint32_t source_sector_in_cluster = 0;
+    uint32_t destination_cluster_current = 0;
+    uint32_t destination_cluster_previous = 0;
+    uint32_t destination_sector_in_cluster = 0;
+    uint32_t remaining = file_size;
+
+    while (remaining != 0) {
+        if (current_source_cluster < 2 ||
+            current_source_cluster - 2 >= source_cluster_count) {
+            if (destination_cluster != 0) {
+                (void)release_fat16_chain(destination, destination_cluster);
+            }
+            return fat16_copy_invalid_source_chain;
+        }
+
+        uint32_t source_lba;
+        if (!fat_volume_cluster_sector(source, current_source_cluster,
+                                       source_sector_in_cluster,
+                                       source_lba) ||
+            !ata_read_sector(source.ata_drive, source_lba,
+                             copy_sector_buffer)) {
+            if (destination_cluster != 0) {
+                (void)release_fat16_chain(destination, destination_cluster);
+            }
+            return fat16_copy_source_read_failed;
+        }
+
+        if (destination_cluster_current == 0 ||
+            destination_sector_in_cluster ==
+                destination.sectors_per_cluster) {
+            uint32_t allocated_cluster;
+            if (!allocate_fat16_cluster(destination, allocated_cluster)) {
+                if (destination_cluster != 0) {
+                    (void)release_fat16_chain(destination,
+                                               destination_cluster);
+                }
+                return fat16_copy_no_space;
+            }
+            if (destination_cluster == 0) {
+                destination_cluster = allocated_cluster;
+            } else if (!write_fat16_entry(
+                           destination, destination_cluster_previous,
+                           static_cast<uint16_t>(allocated_cluster))) {
+                (void)write_fat16_entry(destination, allocated_cluster, 0);
+                (void)release_fat16_chain(destination, destination_cluster);
+                return fat16_copy_destination_write_failed;
+            }
+            destination_cluster_previous = allocated_cluster;
+            destination_cluster_current = allocated_cluster;
+            destination_sector_in_cluster = 0;
+        }
+
+        const uint32_t bytes_to_copy = remaining < 512 ? remaining : 512;
+        for (uint32_t byte = bytes_to_copy; byte < 512; ++byte) {
+            copy_sector_buffer[byte] = 0;
+        }
+        uint32_t destination_lba;
+        if (!fat16_cluster_sector(destination, destination_cluster_current,
+                                  destination_sector_in_cluster,
+                                  destination_lba) ||
+            !ata_write_sector(destination.ata_drive, destination_lba,
+                              copy_sector_buffer)) {
+            (void)release_fat16_chain(destination, destination_cluster);
+            destination_cluster = 0;
+            return fat16_copy_destination_write_failed;
+        }
+
+        remaining -= bytes_to_copy;
+        ++destination_sector_in_cluster;
+        ++source_sector_in_cluster;
+        if (remaining != 0 &&
+            source_sector_in_cluster == source.sectors_per_cluster) {
+            uint32_t next_cluster;
+            if (!read_fat_entry(source, current_source_cluster, next_cluster)) {
+                (void)release_fat16_chain(destination, destination_cluster);
+                destination_cluster = 0;
+                return fat16_copy_source_read_failed;
+            }
+            if (next_cluster >= (source.fat_type == 12 ? 0xFF8 :
+                                 source.fat_type == 16 ? 0xFFF8 :
+                                                        0x0FFFFFF8)) {
+                (void)release_fat16_chain(destination, destination_cluster);
+                destination_cluster = 0;
+                return fat16_copy_invalid_source_chain;
+            }
+            current_source_cluster = next_cluster;
+            source_sector_in_cluster = 0;
+        }
+    }
+    return fat16_copy_success;
+}
+
+static bool is_copy_directory_entry(const uint8_t raw[32]) {
+    if (raw[0] == 0 || raw[0] == 0xE5 || raw[11] == 0x0F ||
+        (raw[11] & 0x08) != 0 || raw[0] == '.') return false;
+    return true;
+}
+
+static Fat16CopyResult collect_copy_directory_entries(
+    const FatVolume& source,
+    uint32_t directory_cluster,
+    uint32_t depth,
+    uint32_t& entry_count
+) {
+    entry_count = 0;
+    if (depth >= 16) return fat16_copy_depth_limit;
+    const uint32_t cluster_count =
+        (source.total_sectors - source.data_sector) /
+        source.sectors_per_cluster;
+    const bool fixed_root = directory_cluster == 0 &&
+                            source.fat_type != 32;
+
+    if (fixed_root) {
+        for (uint32_t sector = 0; sector < source.root_sectors; ++sector) {
+            const uint32_t lba =
+                source.partition_start + source.root_sector + sector;
+            if (!ata_read_sector(source.ata_drive, lba, copy_sector_buffer)) {
+                return fat16_copy_source_read_failed;
+            }
+            for (uint32_t offset = 0; offset < 512; offset += 32) {
+                const uint8_t* raw = copy_sector_buffer + offset;
+                if (raw[0] == 0) return fat16_copy_success;
+                if (!is_copy_directory_entry(raw)) continue;
+                if (entry_count >= 128) return fat16_copy_entry_limit;
+                for (uint32_t byte = 0; byte < 32; ++byte) {
+                    copy_directory_entries[depth][entry_count][byte] = raw[byte];
+                }
+                ++entry_count;
+            }
+        }
+        return fat16_copy_success;
+    }
+
+    uint32_t cluster = directory_cluster == 0
+        ? source.root_cluster : directory_cluster;
+    for (uint32_t chain = 0; chain < cluster_count; ++chain) {
+        if (cluster < 2 || cluster - 2 >= cluster_count) {
+            return fat16_copy_invalid_source_chain;
+        }
+        for (uint32_t sector = 0; sector < source.sectors_per_cluster;
+             ++sector) {
+            uint32_t lba;
+            if (!fat_volume_cluster_sector(source, cluster, sector, lba) ||
+                !ata_read_sector(source.ata_drive, lba, copy_sector_buffer)) {
+                return fat16_copy_source_read_failed;
+            }
+            for (uint32_t offset = 0; offset < 512; offset += 32) {
+                const uint8_t* raw = copy_sector_buffer + offset;
+                if (raw[0] == 0) return fat16_copy_success;
+                if (!is_copy_directory_entry(raw)) continue;
+                if (entry_count >= 128) return fat16_copy_entry_limit;
+                for (uint32_t byte = 0; byte < 32; ++byte) {
+                    copy_directory_entries[depth][entry_count][byte] = raw[byte];
+                }
+                ++entry_count;
+            }
+        }
+        uint32_t next_cluster;
+        if (!read_fat_entry(source, cluster, next_cluster)) {
+            return fat16_copy_source_read_failed;
+        }
+        const uint32_t end_marker = source.fat_type == 12 ? 0xFF8 :
+                                    source.fat_type == 16 ? 0xFFF8 :
+                                                           0x0FFFFFF8;
+        if (next_cluster >= end_marker) return fat16_copy_success;
+        cluster = next_cluster;
+    }
+    return fat16_copy_invalid_source_chain;
+}
+
+static Fat16CopyResult copy_fat16_item(
+    const FatVolume& source,
+    const FatVolume& destination,
+    const uint8_t source_record[32],
+    uint32_t destination_parent,
+    uint32_t depth
+);
+
+static Fat16CopyResult copy_fat16_directory(
+    const FatVolume& source,
+    const FatVolume& destination,
+    uint32_t source_directory,
+    uint32_t destination_directory,
+    uint32_t depth
+) {
+    uint32_t entry_count;
+    Fat16CopyResult result = collect_copy_directory_entries(
+        source, source_directory, depth, entry_count);
+    if (result != fat16_copy_success) return result;
+
+    for (uint32_t index = 0; index < entry_count; ++index) {
+        result = copy_fat16_item(
+            source, destination, copy_directory_entries[depth][index],
+            destination_directory, depth + 1);
+        if (result != fat16_copy_success) return result;
+    }
+    return fat16_copy_success;
+}
+
+static Fat16CopyResult copy_fat16_item(
+    const FatVolume& source,
+    const FatVolume& destination,
+    const uint8_t source_record[32],
+    uint32_t destination_parent,
+    uint32_t depth
+) {
+    if (!source.mounted || !destination.mounted ||
+        destination.fat_type != 16) {
+        return fat16_copy_unsupported_destination;
+    }
+    if (depth >= 16) return fat16_copy_depth_limit;
+
+    uint8_t record[32];
+    for (uint32_t byte = 0; byte < sizeof(record); ++byte) {
+        record[byte] = source_record[byte];
+    }
+    const bool directory = (record[11] & 0x10) != 0;
+    uint32_t destination_cluster = 0;
+    if (directory) {
+        const uint32_t source_cluster =
+            (static_cast<uint32_t>(read_le16(record, 20)) << 16) |
+            read_le16(record, 26);
+        if (source_cluster < 2) return fat16_copy_invalid_source_chain;
+        if (!allocate_fat16_cluster(destination, destination_cluster)) {
+            return fat16_copy_no_space;
+        }
+        if (!initialize_fat16_directory(destination, destination_cluster,
+                                        destination_parent)) {
+            (void)write_fat16_entry(destination, destination_cluster, 0);
+            return fat16_copy_destination_write_failed;
+        }
+        record[20] = 0;
+        record[21] = 0;
+        record[26] = static_cast<uint8_t>(destination_cluster);
+        record[27] = static_cast<uint8_t>(destination_cluster >> 8);
+        record[28] = 0;
+        record[29] = 0;
+        record[30] = 0;
+        record[31] = 0;
+        Fat16CopyResult result = insert_fat16_copy_entry(
+            destination, destination_parent, record);
+        if (result != fat16_copy_success) {
+            (void)write_fat16_entry(destination, destination_cluster, 0);
+            return result;
+        }
+        return copy_fat16_directory(source, destination, source_cluster,
+                                    destination_cluster, depth);
+    }
+
+    const uint32_t source_cluster =
+        (static_cast<uint32_t>(read_le16(record, 20)) << 16) |
+        read_le16(record, 26);
+    const uint32_t file_size = read_le32(record, 28);
+    Fat16CopyResult result = copy_fat16_file_data(
+        source, destination, source_cluster, file_size, destination_cluster);
+    if (result != fat16_copy_success) return result;
+    record[20] = 0;
+    record[21] = 0;
+    record[26] = static_cast<uint8_t>(destination_cluster);
+    record[27] = static_cast<uint8_t>(destination_cluster >> 8);
+    result = insert_fat16_copy_entry(destination, destination_parent, record);
+    if (result != fat16_copy_success && destination_cluster != 0) {
+        (void)release_fat16_chain(destination, destination_cluster);
+    }
+    return result;
+}
+
+static bool copy_target_is_inside_source(uint32_t destination_parent) {
+    if (!file_manager_clipboard_entry.directory ||
+        file_manager_clipboard_volume != 0) return false;
+    const uint32_t source_cluster = file_manager_clipboard_entry.cluster;
+    if (destination_parent == source_cluster) return true;
+    if (file_manager_volume_index == 0) {
+        if (file_manager_directory_cluster == source_cluster) return true;
+        for (uint32_t index = 0; index < file_manager_parent_depth; ++index) {
+            if (file_manager_parent_clusters[index] == source_cluster) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static const char* fat16_copy_error_text(Fat16CopyResult result) {
+    switch (result) {
+    case fat16_copy_unsupported_destination:
+        return "粘贴目标需要 A: FAT16";
+    case fat16_copy_source_read_failed:
+        return "复制失败：源磁盘读取错误";
+    case fat16_copy_destination_read_failed:
+        return "复制失败：目标目录读取错误";
+    case fat16_copy_destination_write_failed:
+        return "复制失败：目标磁盘写入错误";
+    case fat16_copy_no_space:
+        return "复制失败：A: 空间不足";
+    case fat16_copy_duplicate_name:
+        return "复制失败：目标已有同名项";
+    case fat16_copy_entry_limit:
+        return "复制失败：目录达到128项上限";
+    case fat16_copy_depth_limit:
+        return "复制失败：文件夹层级超过限制";
+    case fat16_copy_invalid_source_chain:
+        return "复制失败：源文件系统数据无效";
+    case fat16_copy_into_self:
+        return "不能将文件夹复制到自身内部";
+    case fat16_copy_success:
+        return "";
+    }
+    return "复制失败";
+}
+
+static void copy_selected_file_manager_entry() {
+    if (!file_manager_volumes[file_manager_volume_index].mounted ||
+        file_manager_selected >= file_manager_entry_count) {
+        return;
+    }
+    file_manager_clipboard_entry =
+        file_manager_entries[file_manager_selected];
+    file_manager_clipboard_volume = file_manager_volume_index;
+    file_manager_clipboard_valid = true;
+    copy_zex_literal(file_manager_feedback, sizeof(file_manager_feedback),
+                     "已复制 ");
+    append_text(file_manager_feedback, sizeof(file_manager_feedback),
+                file_manager_clipboard_entry.name);
+    render_zex_window();
+}
+
+static void paste_file_manager_clipboard(bool file_manager) {
+    if (!file_manager_clipboard_valid) return;
+    uint32_t destination_parent =
+        file_manager && file_manager_volume_index == 0
+            ? file_manager_directory_cluster : 0;
+    if (copy_target_is_inside_source(destination_parent)) {
+        copy_zex_literal(file_manager_feedback, sizeof(file_manager_feedback),
+                         fat16_copy_error_text(fat16_copy_into_self));
+        if (file_manager) redraw_file_manager();
+        return;
+    }
+
+    FatVolume& destination = file_manager_volumes[0];
+    if (!mount_nova_data_volume(destination)) {
+        copy_zex_literal(file_manager_feedback, sizeof(file_manager_feedback),
+                         "粘贴失败：A: 数据盘不可用");
+        if (file_manager) redraw_file_manager();
+        return;
+    }
+    const FatVolume& source =
+        file_manager_volumes[file_manager_clipboard_volume];
+    uint8_t record[32] = {};
+    for (uint32_t byte = 0; byte < sizeof(file_manager_clipboard_entry.short_name);
+         ++byte) {
+        record[byte] = file_manager_clipboard_entry.short_name[byte];
+    }
+    record[11] = file_manager_clipboard_entry.attributes;
+    record[20] = static_cast<uint8_t>(
+        file_manager_clipboard_entry.cluster >> 16);
+    record[21] = static_cast<uint8_t>(
+        file_manager_clipboard_entry.cluster >> 24);
+    record[26] = static_cast<uint8_t>(file_manager_clipboard_entry.cluster);
+    record[27] = static_cast<uint8_t>(
+        file_manager_clipboard_entry.cluster >> 8);
+    record[28] = static_cast<uint8_t>(file_manager_clipboard_entry.size);
+    record[29] = static_cast<uint8_t>(
+        file_manager_clipboard_entry.size >> 8);
+    record[30] = static_cast<uint8_t>(
+        file_manager_clipboard_entry.size >> 16);
+    record[31] = static_cast<uint8_t>(
+        file_manager_clipboard_entry.size >> 24);
+
+    const Fat16CopyResult result = copy_fat16_item(
+        source, destination, record, destination_parent, 0);
+    if (result == fat16_copy_success) {
+        copy_zex_literal(file_manager_feedback, sizeof(file_manager_feedback),
+                         "粘贴完成");
+    } else {
+        copy_zex_literal(file_manager_feedback, sizeof(file_manager_feedback),
+                         fat16_copy_error_text(result));
+    }
+    if (file_manager) reload_file_manager_directory();
+    else redraw_context_menu_scene();
 }
 
 static void begin_create_dialog(bool directory) {
@@ -2678,8 +3198,16 @@ static void file_manager_select_mouse_row() {
         return;
     }
 
+    const int action_toolbar_y = toolbar_y + 38;
+    if (mouse_y >= action_toolbar_y && mouse_y < action_toolbar_y + 32) {
+        if (mouse_x >= window_x + 179 && mouse_x < window_x + 213) {
+            copy_selected_file_manager_entry();
+        }
+        return;
+    }
+
     const int grid_left = window_x + 181;
-    const int grid_top = window_y + 112;
+    const int grid_top = window_y + 140;
     if (mouse_x < grid_left || mouse_y < grid_top) return;
     const uint32_t column = static_cast<uint32_t>(mouse_x - grid_left) / 132;
     const uint32_t row = static_cast<uint32_t>(mouse_y - grid_top) / 140;
@@ -2795,6 +3323,7 @@ static void run_zex_file_manager() {
     file_manager_volumes[1].ata_drive = 1;
     mount_nova_data_volume(file_manager_volumes[0]);
     mount_fat_volume(file_manager_volumes[1]);
+    file_manager_feedback[0] = '\0';
     file_manager_volume_index = file_manager_volumes[1].mounted ? 1 : 0;
     file_manager_directory_cluster = 0;
     file_manager_parent_depth = 0;
