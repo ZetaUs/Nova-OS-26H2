@@ -1107,11 +1107,13 @@ static void draw_file_manager() {
     fill_rounded_rect_gradient(copy_x, copy_y, 34, 28, 4,
                                copy_button_top, copy_button_bottom);
     const uint32_t copy_icon = copy_available ? 0xE3EDF7 : 0x8293A3;
-    fill_rect(copy_x + 10, copy_y + 6, 12, 14, 0x16344E);
-    fill_rect(copy_x + 11, copy_y + 5, 10, 12, copy_icon);
-    fill_rect(copy_x + 13, copy_y + 8, 6, 1, 0x315A7D);
-    fill_rect(copy_x + 13, copy_y + 11, 6, 1, 0x315A7D);
-    fill_rect(copy_x + 13, copy_y + 14, 5, 1, 0x315A7D);
+    fill_rect(copy_x + 7, copy_y + 9, 12, 15, 0x16344E);
+    fill_rect(copy_x + 8, copy_y + 8, 10, 13, copy_icon);
+    fill_rect(copy_x + 13, copy_y + 4, 13, 18, 0x10283D);
+    fill_rect(copy_x + 14, copy_y + 5, 11, 16, copy_icon);
+    fill_rect(copy_x + 16, copy_y + 8, 7, 1, 0x315A7D);
+    fill_rect(copy_x + 16, copy_y + 11, 7, 1, 0x315A7D);
+    fill_rect(copy_x + 16, copy_y + 14, 6, 1, 0x315A7D);
     if (file_manager_feedback[0] != '\0') {
         draw_text(file_manager_feedback, copy_x + 44, copy_y + 7, 1,
                   0xD6E4F2);
@@ -1169,7 +1171,6 @@ static bool context_menu_create_available() {
 
 static bool context_menu_paste_available() {
     return file_manager_clipboard_valid &&
-        file_manager_volumes[0].mounted &&
         (!context_menu_file_manager || file_manager_volume_index == 0);
 }
 
@@ -2622,9 +2623,10 @@ static Fat16CopyResult copy_fat16_item(
     return result;
 }
 
-static bool copy_target_is_inside_source(uint32_t destination_parent) {
+static bool copy_target_is_inside_source(bool file_manager,
+                                         uint32_t destination_parent) {
     if (!file_manager_clipboard_entry.directory ||
-        file_manager_clipboard_volume != 0) return false;
+        file_manager_clipboard_volume != 0 || !file_manager) return false;
     const uint32_t source_cluster = file_manager_clipboard_entry.cluster;
     if (destination_parent == source_cluster) return true;
     if (file_manager_volume_index == 0) {
@@ -2653,7 +2655,7 @@ static const char* fat16_copy_error_text(Fat16CopyResult result) {
     case fat16_copy_duplicate_name:
         return "复制失败：目标已有同名项";
     case fat16_copy_entry_limit:
-        return "复制失败：目录达到128项上限";
+        return "复制失败：目标目录已满或源目录超过128项";
     case fat16_copy_depth_limit:
         return "复制失败：文件夹层级超过限制";
     case fat16_copy_invalid_source_chain:
@@ -2687,7 +2689,7 @@ static void paste_file_manager_clipboard(bool file_manager) {
     uint32_t destination_parent =
         file_manager && file_manager_volume_index == 0
             ? file_manager_directory_cluster : 0;
-    if (copy_target_is_inside_source(destination_parent)) {
+    if (copy_target_is_inside_source(file_manager, destination_parent)) {
         copy_zex_literal(file_manager_feedback, sizeof(file_manager_feedback),
                          fat16_copy_error_text(fat16_copy_into_self));
         if (file_manager) redraw_file_manager();
@@ -2729,6 +2731,11 @@ static void paste_file_manager_clipboard(bool file_manager) {
     if (result == fat16_copy_success) {
         copy_zex_literal(file_manager_feedback, sizeof(file_manager_feedback),
                          "粘贴完成");
+    } else if (file_manager_clipboard_entry.directory) {
+        copy_zex_literal(file_manager_feedback, sizeof(file_manager_feedback),
+                         "复制未完成：目标文件夹可能部分写入；");
+        append_text(file_manager_feedback, sizeof(file_manager_feedback),
+                    fat16_copy_error_text(result));
     } else {
         copy_zex_literal(file_manager_feedback, sizeof(file_manager_feedback),
                          fat16_copy_error_text(result));
