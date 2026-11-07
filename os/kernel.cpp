@@ -1169,8 +1169,8 @@ static bool context_menu_create_available() {
 
 static bool context_menu_paste_available() {
     return file_manager_clipboard_valid &&
-        context_menu_file_manager && file_manager_volume_index == 0 &&
-        file_manager_volumes[0].mounted;
+        file_manager_volumes[0].mounted &&
+        (!context_menu_file_manager || file_manager_volume_index == 0);
 }
 
 static void draw_context_menu() {

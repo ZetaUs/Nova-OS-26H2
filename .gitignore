@@ -1,3 +1,5 @@
 .vscode/
 TRYIMAGE/
 Program/
+
+*.ppm
