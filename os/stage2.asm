@@ -36,6 +36,10 @@ start:
     jne vbe_error
 
     mov byte [bochs_vbe_available], 0
+    cmp byte [vbe_mode_info + 25], 32
+    jne .select_standard_mode
+    cmp byte [vbe_mode_info + 27], 6
+    jne .select_standard_mode
     mov dx, 0x01CE
     xor ax, ax
     out dx, ax
