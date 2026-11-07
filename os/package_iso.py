@@ -90,8 +90,8 @@ def boot_catalog():
 
     entry = 32
     catalog[entry] = 0x88
-    catalog[entry + 1] = 0x04
-    catalog[entry + 4 : entry + 6] = (1).to_bytes(2, "little")
+    catalog[entry + 1] = 0x00
+    catalog[entry + 6 : entry + 8] = (265).to_bytes(2, "little")
     catalog[entry + 8 : entry + 12] = BOOT_IMAGE_SECTOR.to_bytes(4, "little")
     return catalog
 

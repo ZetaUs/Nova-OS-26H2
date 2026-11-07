@@ -9,6 +9,7 @@ start:
     mov ss, ax
     mov sp, 0x7C00
     mov [boot_drive], dl
+    cld
     sti
 
     in al, 0x92
@@ -36,21 +37,48 @@ start:
     cmp ax, 0x004F
     jne vbe_error
 
-    mov word [kernel_dap + 4], 0
-    mov word [kernel_dap + 6], 0x1000
-    mov dword [kernel_dap + 8], 9
-    mov byte [kernel_chunks_left], 4
-.load_kernel_chunk:
-    mov si, kernel_dap
+    cmp byte [boot_drive], 0xE0
+    jae .kernel_preloaded
+    mov ah, 0x08
     mov dl, [boot_drive]
-    mov ah, 0x42
     int 0x13
     jc kernel_error
-    add word [kernel_dap + 6], 0x0800
-    add dword [kernel_dap + 8], 64
-    dec byte [kernel_chunks_left]
+    and cl, 0x3F
+    mov [sectors_per_track], cl
+    inc dh
+    mov [heads_per_cylinder], dh
+
+    mov dword [kernel_lba], 9
+    mov word [kernel_segment], 0x1000
+    mov word [kernel_sectors_left], 256
+.load_kernel_chunk:
+    mov ax, [kernel_lba]
+    xor dx, dx
+    xor cx, cx
+    mov cl, [sectors_per_track]
+    div cx
+    inc dl
+    mov [chs_sector], dl
+    xor dx, dx
+    xor cx, cx
+    mov cl, [heads_per_cylinder]
+    div cx
+    mov dh, dl
+    mov ch, al
+    mov cl, [chs_sector]
+    mov ax, [kernel_segment]
+    mov es, ax
+    xor bx, bx
+    mov dl, [boot_drive]
+    mov ax, 0x0201
+    int 0x13
+    jc kernel_error
+    inc dword [kernel_lba]
+    add word [kernel_segment], 0x20
+    dec word [kernel_sectors_left]
     jnz .load_kernel_chunk
 
+.kernel_preloaded:
     cli
     lgdt [gdt_descriptor]
     mov eax, cr0
@@ -92,14 +120,12 @@ gdt_descriptor:
     dw gdt_end - gdt_start - 1
     dd gdt_start
 
-kernel_dap:
-    db 0x10, 0
-    dw 64
-    dw 0
-    dw 0x1000
-    dd 9
-    dd 0
-kernel_chunks_left: db 0
+kernel_lba: dd 0
+kernel_segment: dw 0
+kernel_sectors_left: dw 0
+sectors_per_track: db 0
+heads_per_cylinder: db 0
+chs_sector: db 0
 
 boot_drive: db 0
 vbe_error_message: db 'Nova OS: VBE mode unavailable', 0
@@ -115,6 +141,16 @@ protected_mode_entry:
     mov es, ax
     mov ss, ax
     mov esp, 0x120000
+
+    cmp byte [boot_drive], 0xE0
+    jb .kernel_ready
+    mov esi, 0x28DFF
+    mov edi, 0x2FFFF
+    mov ecx, 131072
+    std
+    rep movsb
+    cld
+.kernel_ready:
 
     ; Configure the Bochs/QEMU VBE extension for the 1920x1080x32 desktop.
     mov dx, 0x01CE

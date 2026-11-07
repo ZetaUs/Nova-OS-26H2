@@ -10,7 +10,7 @@ From the workspace root, run:
 .\os\build.bat
 ```
 
-The build uses the Dev-C++ MinGW-w64 compiler (`-m64`), the bundled NASM assembler, and Python 3 to embed the Chinese glyphs and ASC48 English glyphs used by the desktop and menu. It produces `os\build\nova-os-26h2.img` and the BIOS-bootable `os\build\nova-os-26h2.iso` so that an older running QEMU instance can keep using the previous disk image. The ISO contains the raw disk image as an El Torito hard-disk-emulation boot image. If Dev-C++ is installed elsewhere, set `DEVCPP_HOME` to its installation directory before building.
+The build uses the Dev-C++ MinGW-w64 compiler (`-m64`), the bundled NASM assembler, and Python 3 to embed the Chinese glyphs and ASC48 English glyphs used by the desktop and menu. It produces `os\build\nova-os-26h2.img` and the BIOS-bootable `os\build\nova-os-26h2.iso` so that an older running QEMU instance can keep using the previous disk image. The ISO contains the raw boot image as an El Torito no-emulation image and preloads its BIOS boot sectors; because the kernel currently reads its wallpaper through ATA PIO, an ISO boot falls back to a solid desktop background when no readable ATA hard disk provides the image. If Dev-C++ is installed elsewhere, set `DEVCPP_HOME` to its installation directory before building.
 
 Source images are kept under the workspace-root `image` folder: wallpaper, logo, mouse pointer, and `image\icons\file.png` / `folder.png` for file-manager items. The build converts them into embedded kernel assets; generated headers and test screenshots in `os\build` are outputs, not source images.
 

@@ -1632,7 +1632,16 @@ static bool load_desktop_wallpaper() {
         wallpaper_width * wallpaper_height * sizeof(uint16_t) / 512;
     for (uint32_t sector = 0; sector < sector_count; ++sector) {
         if (!ata_read_sector(0, wallpaper_lba + sector,
-                             destination + sector * 512)) return false;
+                             destination + sector * 512)) {
+            uint16_t* const fallback =
+                reinterpret_cast<uint16_t*>(wallpaper_address);
+            const uint32_t pixel_count = wallpaper_width * wallpaper_height;
+            for (uint32_t pixel_index = 0; pixel_index < pixel_count;
+                 ++pixel_index) {
+                fallback[pixel_index] = 0x10A5;
+            }
+            return true;
+        }
     }
     return true;
 }
