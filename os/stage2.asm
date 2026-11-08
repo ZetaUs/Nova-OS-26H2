@@ -29,12 +29,6 @@ start:
     call save_vbe_mode_info
     jc vbe_error
 
-    mov ax, 0x4F02
-    mov bx, 0x4118
-    int 0x10
-    cmp ax, 0x004F
-    jne vbe_error
-
     mov byte [bochs_vbe_available], 0
     cmp byte [vbe_mode_info + 25], 32
     jne .select_standard_mode
@@ -48,7 +42,12 @@ start:
     cmp ax, 0xB0C5
     jne .select_standard_mode
     mov byte [bochs_vbe_available], 1
-    jmp .video_mode_ready
+    mov ax, 0x4F02
+    mov bx, 0x4118
+    int 0x10
+    cmp ax, 0x004F
+    je .video_mode_ready
+    mov byte [bochs_vbe_available], 0
 
 .select_standard_mode:
     call find_vbe_32bit_mode
